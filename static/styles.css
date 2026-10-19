@@ -178,6 +178,19 @@ select:focus {
   flex-basis: 100%;
 }
 
+.file-status-panel {
+  margin-top: 22px;
+  border-top: 1px solid #e6eaf1;
+  padding-top: 16px;
+}
+
+.file-status-panel summary {
+  color: #334157;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 .button {
   min-height: 40px;
   padding: 10px 15px;

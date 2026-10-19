@@ -33,22 +33,35 @@ and sending local attachment files through an editable CSV mapping.
 - **Download mail** searches the selected single inbox from the chosen date
   onward, optionally filtering by one or more comma-separated sender addresses.
   Multiple senders are combined as OR matches.
-  Every use case gets a unique UUID test ID and a JSON record at
-  `data/tests/<test-id>.json`. It stores the search fields, message results,
+  Enter a test name to label each saved run. Every use case gets a unique UUID
+  test ID and a JSON record at `data/tests/<test-id>.json`. It stores the test
+  name, search fields, message results,
   operation status/progress/errors, and counts for found, downloaded messages,
   downloaded files, and updated (uploaded) messages. Removing a row only
   removes it from that saved run; it does not delete the Gmail message.
   After reviewing search results, choose an output folder and start downloading.
-  Downloaded attachments are written beneath that folder, grouped by test run
-  and account.
+  Attachments are written directly into that folder. If a filename already
+  exists, the message UID is added to avoid overwriting it.
 - **Upload attachments** scans the selected local folder recursively and
   generates mapping rows from standalone five-digit roll numbers in filenames.
-  The CSV uses columns `roll_number,mail_account,sent`; enter a recipient email
-  for each roll number. A unique matching local file is sent as a new email
+  Enter a test name for each upload run. The shared CSV uses columns
+  `roll_number,mail_account`; these mappings are reused across tests. A unique
+  matching local file is sent as a new email
   attachment from the selected Gmail account. If more than one file matches a
-  roll number, that mapping is reported as ambiguous and is not sent. Successful
-  sends are marked `sent`; clear that value to enable a resend. Scanning a folder
-  preserves existing recipient mappings and sent status.
+  roll number, that mapping is reported as ambiguous and is not sent. Per-file
+  sent status is stored in that upload run's JSON record, not in the shared CSV.
+  Set the email subject template for each upload; `{roll_number}` is replaced
+  with the matching five-digit value.
+  The upload page shows a collapsible per-file status list for the selected run.
+  Scanning a folder preserves existing recipient mappings.
+  Select **Randomly distribute to evaluators** to save a separate evaluator
+  name/email list in `data/evaluators.csv` and randomly distribute uniquely
+  identified student files as evenly as possible across them. Each file is
+  assigned to no more than one evaluator; each run records the exact
+  file-to-evaluator assignments and send status.
+  Starting an upload creates a dedicated upload-run JSON record, independent of
+  download/search test records. The upload history selector lists upload runs
+  only.
 
 Searching senders, downloading messages, and sending mapped files run in
 parallel worker threads. The dashboard polls the saved test record for progress

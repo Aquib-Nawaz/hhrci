@@ -88,13 +88,14 @@ function setMessageRows(messages) {
 
 function displayTest(testRun) {
   currentTest = testRun;
+  document.querySelector("#test-name").value = testRun.test_name || "";
   downloadFolderPath = testRun.download_fields?.output_folder || "";
   document.querySelector("#download-folder").textContent =
     downloadFolderPath || "Choose a folder after searching.";
   setMessageRows(testRun.messages);
   const counts = testRun.counts;
   runSummary.textContent = [
-    `Test ${testRun.id}`,
+    `Test ${testRun.test_name || testRun.id}`,
     `${counts.found} found`,
     `${counts.downloaded} messages downloaded (${counts.downloaded_files} files)`,
     `${counts.updated} updated`,
@@ -119,7 +120,7 @@ async function loadTests() {
   testHistory.replaceChildren(new Option("Choose a saved run", ""));
   for (const test of tests) {
     testHistory.add(new Option(
-      `${new Date(test.created_at).toLocaleString()} · ${test.message_count} message(s)${activeOperation(test) ? ` · ${activeOperation(test)}` : ""}`,
+      `${test.test_name || new Date(test.created_at).toLocaleString()} · ${test.message_count} message(s)${activeOperation(test) ? ` · ${activeOperation(test)}` : ""}`,
       test.id,
     ));
   }
@@ -222,6 +223,7 @@ searchForm.addEventListener("submit", async (event) => {
   searchStatus.textContent = "Starting search…";
   downloadStatus.textContent = "";
   const payload = {
+    test_name: document.querySelector("#test-name").value.trim(),
     account: accountSelect.value,
     senders: document.querySelector("#senders").value
       .split(/[,\n]/)

@@ -153,13 +153,26 @@ def download_attachments(
         safe_name = Path(filename.replace("\\", "/")).name
         if not safe_name or safe_name in {".", ".."}:
             continue
-        filepath = destination / safe_name
-        if filepath.exists():
-            filepath = destination / f"{uid}_{safe_name}"
         payload = part.get_payload(decode=True)
         if not isinstance(payload, bytes):
             raise RuntimeError(f"Attachment {safe_name} has no decoded byte payload.")
-        filepath.write_bytes(payload)
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix
+        collision_number = 0
+        while True:
+            if collision_number == 0:
+                candidate_name = safe_name
+            elif collision_number == 1:
+                candidate_name = f"{uid}_{safe_name}"
+            else:
+                candidate_name = f"{uid}_{collision_number}_{stem}{suffix}"
+            filepath = destination / candidate_name
+            try:
+                with filepath.open("xb") as output_file:
+                    output_file.write(payload)
+                break
+            except FileExistsError:
+                collision_number += 1
         saved_files.append(str(filepath))
     return saved_files
 

@@ -26,6 +26,11 @@
         <form id="search-form">
           <div class="form-grid">
             <label class="field">
+              Test name
+              <input id="test-name" name="test_name" type="text" placeholder="e.g. October exam papers">
+              <small>A label to identify this saved download test.</small>
+            </label>
+            <label class="field">
               Gmail account
               <select id="account" name="account" required></select>
               <small>This is the single inbox searched.</small>
@@ -84,7 +89,7 @@
               <button id="pick-download-folder" class="button button-secondary" type="button">Choose folder…</button>
               <span id="download-folder" class="folder-path" aria-live="polite">Choose a folder after searching.</span>
             </div>
-            <small>Attachments are saved here, grouped by test ID and Gmail account.</small>
+            <small>Attachments are saved directly in this folder. Existing filenames are preserved with a UID prefix added if needed.</small>
           </div>
           <button id="download-selected" class="button button-primary" type="button" disabled>Download selected attachments</button>
           <span id="download-status" class="status" role="status"></span>

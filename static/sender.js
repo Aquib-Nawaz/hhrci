@@ -7,9 +7,20 @@ const sendResults = document.querySelector("#send-results");
 const testRunSummary = document.querySelector("#test-run-summary");
 const uploadFolderLabel = document.querySelector("#upload-folder");
 const senderAccount = document.querySelector("#sender-account");
+const uploadSubject = document.querySelector("#upload-subject");
 const discoveryStatus = document.querySelector("#discovery-status");
 const discoveryResults = document.querySelector("#discovery-results");
+const fileStatusList = document.querySelector("#file-status-list");
+const fileStatusSummary = document.querySelector("#file-status-summary");
+const fileStatusEmpty = document.querySelector("#file-status-empty");
+const sendMode = document.querySelector("#send-mode");
+const studentMappingPanel = document.querySelector("#student-mapping-panel");
+const studentDiscoveryControls = document.querySelector("#student-discovery-controls");
+const evaluatorPanel = document.querySelector("#evaluator-panel");
+const evaluatorList = document.querySelector("#evaluator-list");
+const evaluatorStatus = document.querySelector("#evaluator-status");
 let uploadFolderPath = "";
+let uploadInProgress = false;
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -30,7 +41,6 @@ function addMappingRow(mapping = {}) {
   for (const [field, placeholder] of [
     ["roll_number", "e.g. 00095"],
     ["mail_account", "recipient@example.com"],
-    ["sent", "pending / sent"],
   ]) {
     const cell = document.createElement("td");
     const input = document.createElement("input");
@@ -39,6 +49,7 @@ function addMappingRow(mapping = {}) {
     input.value = mapping[field] || "";
     input.placeholder = placeholder;
     input.setAttribute("aria-label", field.replaceAll("_", " "));
+    input.addEventListener("input", updateSendButton);
     cell.append(input);
     row.append(cell);
   }
@@ -47,10 +58,45 @@ function addMappingRow(mapping = {}) {
   removeButton.type = "button";
   removeButton.className = "button button-danger";
   removeButton.textContent = "Remove";
-  removeButton.addEventListener("click", () => row.remove());
+  removeButton.addEventListener("click", () => {
+    row.remove();
+    updateSendButton();
+  });
   actionCell.append(removeButton);
   row.append(actionCell);
   mappingList.append(row);
+}
+
+function addEvaluatorRow(evaluator = {}) {
+  const row = document.createElement("tr");
+  for (const [field, placeholder] of [
+    ["name", "e.g. Evaluator 1"],
+    ["email", "evaluator@example.com"],
+  ]) {
+    const cell = document.createElement("td");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.dataset.field = field;
+    input.value = evaluator[field] || "";
+    input.placeholder = placeholder;
+    input.setAttribute("aria-label", `Evaluator ${field}`);
+    input.addEventListener("input", updateSendButton);
+    cell.append(input);
+    row.append(cell);
+  }
+  const actionCell = document.createElement("td");
+  const removeButton = document.createElement("button");
+  removeButton.type = "button";
+  removeButton.className = "button button-danger";
+  removeButton.textContent = "Remove";
+  removeButton.addEventListener("click", () => {
+    row.remove();
+    updateSendButton();
+  });
+  actionCell.append(removeButton);
+  row.append(actionCell);
+  evaluatorList.append(row);
+  updateSendButton();
 }
 
 function collectMappings() {
@@ -61,7 +107,18 @@ function collectMappings() {
         input.value.trim(),
       ]),
     );
-  }).filter((row) => row.roll_number || row.mail_account || row.sent);
+  }).filter((row) => row.roll_number || row.mail_account);
+}
+
+function collectEvaluators() {
+  return [...evaluatorList.querySelectorAll("tr")].map((row) =>
+    Object.fromEntries(
+      [...row.querySelectorAll("input")].map((input) => [
+        input.dataset.field,
+        input.value.trim(),
+      ]),
+    ),
+  ).filter((row) => row.name || row.email);
 }
 
 async function loadMappings() {
@@ -71,11 +128,18 @@ async function loadMappings() {
   if (!rows.length) addMappingRow();
 }
 
+async function loadEvaluators() {
+  const { rows } = await api("/api/evaluators");
+  evaluatorList.replaceChildren();
+  rows.forEach(addEvaluatorRow);
+  if (!rows.length) addEvaluatorRow();
+}
+
 async function loadTests(selectedId = testRunSelect.value) {
-  const { tests } = await api("/api/tests");
-  testRunSelect.replaceChildren(new Option("Choose a saved run", ""));
+  const { tests } = await api("/api/upload-runs");
+  testRunSelect.replaceChildren(new Option("Choose an upload run", ""));
   for (const test of tests) {
-    const label = `${new Date(test.created_at).toLocaleString()} · ${test.counts.found} found · ${test.counts.downloaded} downloaded · ${test.counts.updated} updated`;
+    const label = `${test.test_name || new Date(test.created_at).toLocaleString()} · ${test.upload_mode} · ${test.counts.updated} sent · ${test.operations.upload.status.replaceAll("_", " ")}`;
     testRunSelect.add(new Option(label, test.id));
   }
   if (tests.some((test) => test.id === selectedId)) testRunSelect.value = selectedId;
@@ -92,8 +156,24 @@ async function loadAccounts() {
 }
 
 function updateSendButton() {
+  const readyForMode = sendMode.value === "evaluator"
+    ? collectEvaluators().some((evaluator) =>
+      evaluator.name && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(evaluator.email),
+    )
+    : collectMappings().some((mapping) =>
+      /^\d{5}$/.test(mapping.roll_number) &&
+      /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mapping.mail_account),
+    );
   sendButton.disabled =
-    !testRunSelect.value || !uploadFolderPath || !senderAccount.value;
+    uploadInProgress || !uploadFolderPath || !senderAccount.value || !readyForMode;
+}
+
+function updateSendModePanels() {
+  const isEvaluatorMode = sendMode.value === "evaluator";
+  studentMappingPanel.hidden = isEvaluatorMode;
+  studentDiscoveryControls.hidden = isEvaluatorMode;
+  evaluatorPanel.hidden = !isEvaluatorMode;
+  updateSendButton();
 }
 
 function activeOperation(test) {
@@ -111,8 +191,12 @@ async function showSavedTest(testId) {
   }
 
   const upload = testRun.upload_fields || {};
+  document.querySelector("#test-name").value = testRun.test_name || "";
+  sendMode.value = upload.send_mode || "student";
+  updateSendModePanels();
   uploadFolderPath = upload.folder || "";
   uploadFolderLabel.textContent = uploadFolderPath || "No folder selected";
+  uploadSubject.value = upload.subject_template || "Attachment for roll number {roll_number}";
   if (upload.sender_account) senderAccount.value = upload.sender_account;
   updateSendButton();
   displayProgress(testRun);
@@ -132,7 +216,32 @@ function displayProgress(testRun) {
     ? `Uploading ${progress.completed}/${progress.total}`
     : `Upload ${upload.status.replaceAll("_", " ")}`;
   testRunSummary.textContent =
-    `Test ${testRun.id} · ${counts.found} found · ${counts.downloaded} downloaded (${counts.downloaded_files} files) · ${counts.updated} updated · ${state}`;
+    `Test ${testRun.test_name || testRun.id} · ${testRun.upload_fields?.send_mode || "student"} mode · ${counts.updated} files sent · ${state}`;
+  renderFileStatus(testRun.upload_fields?.file_status || []);
+}
+
+function renderFileStatus(files) {
+  fileStatusList.replaceChildren();
+  const sentCount = files.filter((file) => file.status === "sent").length;
+  fileStatusSummary.textContent =
+    `Files in this upload test (${sentCount}/${files.length} sent)`;
+  fileStatusEmpty.hidden = files.length > 0;
+  for (const file of files) {
+    const row = document.createElement("tr");
+    for (const value of [
+      file.roll_number || "—",
+      file.file,
+      file.evaluator_name
+        ? `${file.evaluator_name} (${file.recipient || "no email"})`
+        : file.recipient || "—",
+      (file.status || "not sent").replaceAll("_", " "),
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    fileStatusList.append(row);
+  }
 }
 
 async function pollUpload(testId) {
@@ -167,7 +276,9 @@ async function pollUpload(testId) {
 }
 
 document.querySelector("#add-row").addEventListener("click", () => addMappingRow());
+document.querySelector("#add-evaluator").addEventListener("click", () => addEvaluatorRow());
 senderAccount.addEventListener("change", updateSendButton);
+sendMode.addEventListener("change", updateSendModePanels);
 
 document.querySelector("#pick-upload-folder").addEventListener("click", async () => {
   discoveryStatus.textContent = "Opening folder picker…";
@@ -232,6 +343,22 @@ document.querySelector("#save-mappings").addEventListener("click", async () => {
   }
 });
 
+document.querySelector("#save-evaluators").addEventListener("click", async () => {
+  evaluatorStatus.textContent = "Saving evaluators…";
+  try {
+    const { rows } = await api("/api/evaluators", {
+      method: "PUT",
+      body: JSON.stringify({ rows: collectEvaluators() }),
+    });
+    evaluatorList.replaceChildren();
+    rows.forEach(addEvaluatorRow);
+    if (!rows.length) addEvaluatorRow();
+    evaluatorStatus.textContent = "Evaluator list saved.";
+  } catch (error) {
+    evaluatorStatus.textContent = error.message;
+  }
+});
+
 testRunSelect.addEventListener("change", async () => {
   updateSendButton();
   testRunSummary.textContent = "";
@@ -245,23 +372,45 @@ testRunSelect.addEventListener("change", async () => {
 });
 
 sendButton.addEventListener("click", async () => {
-  if (!testRunSelect.value) return;
-  sendButton.disabled = true;
-  sendStatus.textContent = "Starting uploads…";
+  uploadInProgress = true;
+  updateSendButton();
+  sendStatus.textContent = "Saving mappings and starting upload…";
   sendResults.hidden = true;
   try {
-    const testRun = await api(`/api/tests/${testRunSelect.value}/send-mappings`, {
+    if (sendMode.value === "student") {
+      const { rows } = await api("/api/mappings", {
+        method: "PUT",
+        body: JSON.stringify({ rows: collectMappings() }),
+      });
+      mappingList.replaceChildren();
+      rows.forEach(addMappingRow);
+      if (!rows.length) addMappingRow();
+    } else {
+      const { rows } = await api("/api/evaluators", {
+        method: "PUT",
+        body: JSON.stringify({ rows: collectEvaluators() }),
+      });
+      evaluatorList.replaceChildren();
+      rows.forEach(addEvaluatorRow);
+    }
+    const testRun = await api("/api/upload-runs", {
       method: "POST",
       body: JSON.stringify({
+        test_name: document.querySelector("#test-name").value.trim(),
         folder: uploadFolderPath,
         sender_account: senderAccount.value,
+        subject_template: uploadSubject.value.trim(),
+        send_mode: sendMode.value,
       }),
     });
+    await loadTests(testRun.id);
     displayProgress(testRun);
+    sendStatus.textContent = "Upload started.";
     await pollUpload(testRun.id);
   } catch (error) {
     sendStatus.textContent = error.message;
   } finally {
+    uploadInProgress = false;
     updateSendButton();
   }
 });
@@ -269,17 +418,22 @@ sendButton.addEventListener("click", async () => {
 async function initialize() {
   try {
     const requestedId = new URLSearchParams(window.location.search).get("testId");
-    const [, tests] = await Promise.all([
+    const [, , tests] = await Promise.all([
       loadMappings(),
-      loadTests(requestedId || ""),
+      loadEvaluators(),
+      loadTests(""),
       loadAccounts(),
     ]);
     const activeTest = tests.find((test) => activeOperation(test));
-    const selectedId = requestedId || activeTest?.id;
+    const selectedId =
+      tests.some((test) => test.id === requestedId)
+        ? requestedId
+        : activeTest?.id;
     if (!selectedId) return;
 
     testRunSelect.value = selectedId;
     await showSavedTest(selectedId);
+    updateSendModePanels();
   } catch (error) {
     mappingStatus.textContent = error.message;
   }

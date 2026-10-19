@@ -31,6 +31,16 @@
         </div>
         <div class="form-grid">
           <label class="field">
+            Test name
+            <input id="test-name" name="test_name" type="text" placeholder="e.g. October exam papers">
+            <small>A label to identify this upload test.</small>
+          </label>
+          <label class="field">
+            Email subject
+            <input id="upload-subject" name="subject_template" type="text" value="Attachment for roll number {roll_number}" required>
+            <small>Use <code>{roll_number}</code> where the five-digit roll number should appear.</small>
+          </label>
+          <label class="field">
             Folder containing attachments
             <div class="folder-picker">
               <button id="pick-upload-folder" class="button button-secondary" type="button">Choose folder…</button>
@@ -41,17 +51,25 @@
           <label class="field">
             Send using Gmail account
             <select id="sender-account" required></select>
-            <small>This account will send the local attachment to each mapping recipient.</small>
+            <small>This account will send each local attachment to the mapped student or assigned evaluator.</small>
+          </label>
+          <label class="field">
+            Send mode
+            <select id="send-mode">
+              <option value="student">Send to students using roll-number mappings</option>
+              <option value="evaluator">Randomly distribute to evaluators</option>
+            </select>
+            <small>Evaluator mode distributes unique student files as evenly as possible across the evaluator list.</small>
           </label>
         </div>
-        <div class="actions">
+        <div id="student-discovery-controls" class="actions">
           <button id="discover-mappings" class="button button-secondary" type="button">Scan folder and generate mappings</button>
           <span id="discovery-status" class="status" role="status"></span>
         </div>
         <div id="discovery-results" class="notice" hidden></div>
       </section>
 
-      <section class="panel">
+      <section id="student-mapping-panel" class="panel">
         <div class="section-heading">
           <div>
             <p class="eyebrow">CSV MAPPING</p>
@@ -59,14 +77,13 @@
           </div>
           <button id="add-row" class="button button-secondary" type="button">Add mapping</button>
         </div>
-        <p class="help-text">The CSV is stored locally at <code>data/mappings.csv</code> with columns <code>roll_number,mail_account,sent</code>. Enter the recipient email for each detected roll number. If multiple files match the same number, none of them are sent until the folder is unambiguous. “Sent” shows the last successful send; a test ID will not send the same roll number twice.</p>
+        <p class="help-text">The CSV is stored locally at <code>data/mappings.csv</code> with columns <code>roll_number,mail_account</code>. These recipient mappings are shared across tests; sending status is tracked separately for each file in each upload run.</p>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>5-digit roll number</th>
                 <th>Recipient email</th>
-                <th>Sent status</th>
                 <th><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
@@ -79,21 +96,68 @@
         </div>
       </section>
 
+      <section id="evaluator-panel" class="panel" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">EVALUATOR LIST</p>
+            <h2>Evaluators</h2>
+          </div>
+          <button id="add-evaluator" class="button button-secondary" type="button">Add evaluator</button>
+        </div>
+        <p class="help-text">The app randomly shuffles eligible files and distributes them as evenly as possible. Each student file is assigned to at most one evaluator. The assignment is saved with this upload test.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Evaluator name</th>
+                <th>Evaluator email</th>
+                <th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="evaluator-list"></tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <button id="save-evaluators" class="button button-secondary" type="button">Save evaluators</button>
+          <span id="evaluator-status" class="status" role="status"></span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <details id="file-status-panel" class="file-status-panel">
+          <summary id="file-status-summary">Files in this upload test</summary>
+          <p id="file-status-empty" class="help-text">Start an upload to see per-file status for that test.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Roll number</th>
+                  <th>File</th>
+                  <th>Recipient / evaluator</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="file-status-list"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
       <section class="panel">
         <div class="section-heading">
           <div>
             <p class="eyebrow">FORWARD UNSENT ROWS</p>
-            <h2>Choose a test record</h2>
+            <h2>Upload run history</h2>
           </div>
         </div>
         <label class="field">
-          Test record for operation history
-          <select id="test-run"><option value="">Choose a saved run</option></select>
+          Previous upload runs
+          <select id="test-run"><option value="">Choose an upload run</option></select>
         </label>
-        <p id="test-run-summary" class="run-summary">Select a test record to see its saved search and upload progress.</p>
-        <p class="help-text">Each local file is sent as a new email with subject “Attachment for roll number {roll_number}” and body “Please find the attached file.” Upload folder and sender account are saved to the selected test’s JSON record.</p>
+        <p id="test-run-summary" class="run-summary">Each upload creates its own record, separate from mail download/search runs.</p>
+        <p class="help-text">Each local file is sent as a new email with subject “Attachment for roll number {roll_number}” and body “Please find the attached file.” The upload folder and sender account are stored in that upload run’s JSON record.</p>
         <div class="actions">
-          <button id="send-mappings" class="button button-primary" type="button" disabled>Upload unsent attachments</button>
+          <button id="send-mappings" class="button button-primary" type="button" disabled>Start upload</button>
           <span id="send-status" class="status" role="status"></span>
         </div>
         <div id="send-results" class="notice" hidden></div>

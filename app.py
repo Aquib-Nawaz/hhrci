@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -26,8 +27,9 @@ load_dotenv(ROOT / ".env")
 DATA_DIR = Path(os.getenv("MAIL_DASHBOARD_DATA_DIR", ROOT / "data")).expanduser()
 TESTS_DIR = DATA_DIR / "tests"
 MAPPINGS_FILE = DATA_DIR / "mappings.csv"
-MAPPING_COLUMNS = ("roll_number", "mail_account", "sent")
-MappingDict = dict[Literal["roll_number", "mail_account", "sent"], str]
+EVALUATORS_FILE = DATA_DIR / "evaluators.csv"
+MAPPING_COLUMNS = ("roll_number", "mail_account")
+MappingDict = dict[Literal["roll_number", "mail_account"], str]
 MessageRecord = dict[str, Any]
 WORKER_COUNT = 8
 UPLOAD_SUBJECT_TEMPLATE = "Attachment for roll number {roll_number}"
@@ -49,6 +51,7 @@ _mappings_lock = threading.Lock()
 
 
 class SearchRequest(BaseModel):
+    test_name: str = ""
     account: str = Field(min_length=1)
     senders: list[str] = Field(default_factory=list)
     after_date: date
@@ -67,11 +70,19 @@ class DownloadRequest(BaseModel):
 class MappingRow(BaseModel):
     roll_number: str
     mail_account: str
-    sent: str = ""
 
 
 class MappingUpdate(BaseModel):
     rows: list[MappingRow]
+
+
+class EvaluatorRow(BaseModel):
+    name: str
+    email: str
+
+
+class EvaluatorUpdate(BaseModel):
+    rows: list[EvaluatorRow]
 
 
 class MappingDiscoveryRequest(BaseModel):
@@ -79,8 +90,11 @@ class MappingDiscoveryRequest(BaseModel):
 
 
 class UploadRequest(BaseModel):
+    test_name: str = ""
     folder: str = Field(min_length=1)
     sender_account: str = Field(min_length=1)
+    subject_template: str = Field(default=UPLOAD_SUBJECT_TEMPLATE, min_length=1)
+    send_mode: Literal["student", "evaluator"] = "student"
 
 
 def _now() -> str:
@@ -162,6 +176,7 @@ def _read_test(test_id: str) -> dict[str, Any]:
             }
         test_run["search_fields"].setdefault("account", "")
         test_run["search_fields"].setdefault("senders", [])
+        test_run.setdefault("test_name", "")
         if not test_run["search_fields"]["account"]:
             legacy_accounts = test_run["search_fields"].get("accounts", [])
             if legacy_accounts:
@@ -182,7 +197,11 @@ def _read_test(test_id: str) -> dict[str, Any]:
         test_run.setdefault(
             "upload_fields", {"folder": "", "sender_account": ""}
         )
+        test_run["upload_fields"].setdefault("send_mode", "student")
+        test_run["upload_fields"].setdefault("evaluators", [])
+        test_run["upload_fields"].setdefault("assignments", [])
         test_run["upload_fields"].setdefault("files_by_roll", {})
+        test_run["upload_fields"].setdefault("file_status", [])
         test_run["upload_fields"].setdefault("ignored_files", [])
         test_run["upload_fields"].setdefault("mappings", [])
         test_run["upload_fields"].setdefault(
@@ -195,6 +214,24 @@ def _read_test(test_id: str) -> dict[str, Any]:
             message.setdefault("downloaded_files", [])
             message.setdefault("updated", False)
         test_run.setdefault("updates", [])
+        if not test_run["upload_fields"]["file_status"]:
+            sent_files = {
+                update.get("file")
+                for update in test_run["updates"]
+                if update.get("file")
+            }
+            test_run["upload_fields"]["file_status"] = [
+                {
+                    "file": filepath,
+                    "roll_number": roll_number,
+                    "recipient": "",
+                    "status": "sent" if filepath in sent_files else "not sent",
+                }
+                for roll_number, filepaths in test_run["upload_fields"][
+                    "files_by_roll"
+                ].items()
+                for filepath in filepaths
+            ]
         operations = test_run.setdefault("operations", {})
         for name in ("search", "download", "upload"):
             operation = operations.setdefault(name, _operation())
@@ -350,7 +387,9 @@ def _read_mappings() -> list[MappingDict]:
                 reader = csv.DictReader(csv_file)
                 if reader.fieldnames not in (
                     list(MAPPING_COLUMNS),
+                    ["roll_number", "mail_account", "sent"],
                     ["attachment_name", "mail_account", "sent"],
+                    ["attachment_name", "mail_account"],
                 ):
                     raise HTTPException(
                         status_code=500,
@@ -359,7 +398,7 @@ def _read_mappings() -> list[MappingDict]:
                             + ", ".join(MAPPING_COLUMNS)
                         ),
                     )
-                return [
+                rows = [
                     MappingDict(
                         {
                             "roll_number": (
@@ -368,42 +407,84 @@ def _read_mappings() -> list[MappingDict]:
                                 or ""
                             ).strip(),
                             "mail_account": (row.get("mail_account") or "").strip(),
-                            "sent": (row.get("sent") or "").strip(),
                         }
                     )
                     for row in reader
                 ]
+            if reader.fieldnames != list(MAPPING_COLUMNS):
+                _write_mappings_unlocked(rows)
+            return rows
         except OSError as error:
             raise HTTPException(
                 status_code=500, detail="Could not read mappings.csv."
             ) from error
 
 
+def _write_mappings_unlocked(rows: list[MappingDict]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = MAPPINGS_FILE.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=MAPPING_COLUMNS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        temp_path.replace(MAPPINGS_FILE)
+    except OSError as error:
+        raise HTTPException(
+            status_code=500, detail="Could not save mappings.csv."
+        ) from error
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _write_mappings(rows: list[MappingDict]) -> None:
     with _mappings_lock:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        temp_path = MAPPINGS_FILE.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        _write_mappings_unlocked(rows)
+
+
+def _read_evaluators() -> list[dict[str, str]]:
+    with _mappings_lock:
+        if not EVALUATORS_FILE.exists():
+            return []
         try:
-            with temp_path.open("w", newline="", encoding="utf-8") as csv_file:
-                writer = csv.DictWriter(csv_file, fieldnames=MAPPING_COLUMNS)
-                writer.writeheader()
-                for row in rows:
-                    writer.writerow(row)
-            temp_path.replace(MAPPINGS_FILE)
+            with EVALUATORS_FILE.open(newline="", encoding="utf-8") as csv_file:
+                reader = csv.DictReader(csv_file)
+                if reader.fieldnames != ["name", "email"]:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="evaluators.csv must have columns in order: name,email",
+                    )
+                return [
+                    {
+                        "name": (row.get("name") or "").strip(),
+                        "email": (row.get("email") or "").strip(),
+                    }
+                    for row in reader
+                ]
         except OSError as error:
             raise HTTPException(
-                status_code=500, detail="Could not save mappings.csv."
+                status_code=500, detail="Could not read evaluators.csv."
+            ) from error
+
+
+def _write_evaluators(rows: list[dict[str, str]]) -> None:
+    with _mappings_lock:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        temp_path = EVALUATORS_FILE.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        try:
+            with temp_path.open("w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=("name", "email"))
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({"name": row["name"], "email": row["email"]})
+            temp_path.replace(EVALUATORS_FILE)
+        except OSError as error:
+            raise HTTPException(
+                status_code=500, detail="Could not save evaluators.csv."
             ) from error
         finally:
             temp_path.unlink(missing_ok=True)
-
-
-def _safe_account_folder(account: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", account)
-
-
-def _is_sent(value: str) -> bool:
-    return value.strip().casefold() in {"yes", "true", "1", "sent"}
 
 
 def _find_upload_files(folder: Path) -> tuple[dict[str, list[Path]], list[str]]:
@@ -421,6 +502,135 @@ def _find_upload_files(folder: Path) -> tuple[dict[str, list[Path]], list[str]]:
             continue
         files_by_roll.setdefault(roll_numbers[0], []).append(path)
     return files_by_roll, ignored
+
+
+def _prepare_upload(
+    request: UploadRequest,
+) -> tuple[
+    Path,
+    dict[str, list[Path]],
+    list[str],
+    list[MappingDict],
+    list[dict[str, str]],
+]:
+    accounts = _accounts()
+    _require_single_account(accounts)
+    if request.sender_account not in accounts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sender account is not configured: {request.sender_account}",
+        )
+    folder = Path(request.folder).expanduser().resolve()
+    if not folder.is_dir():
+        raise HTTPException(
+            status_code=400, detail=f"Upload folder does not exist: {folder}"
+        )
+    files_by_roll, ignored_files = _find_upload_files(folder)
+    mappings = _read_mappings()
+    evaluators = _read_evaluators() if request.send_mode == "evaluator" else []
+    if request.send_mode == "student":
+        if not any(
+            re.fullmatch(r"\d{5}", row["roll_number"])
+            and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", row["mail_account"])
+            and row["roll_number"] in files_by_roll
+            for row in mappings
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Add a valid recipient mapping for at least one file in the selected folder before starting the upload.",
+            )
+    else:
+        if not evaluators:
+            raise HTTPException(
+                status_code=400,
+                detail="Add at least one evaluator name and email before starting random distribution.",
+            )
+        if any(
+            not evaluator["name"]
+            or not re.fullmatch(
+                r"[^@\s]+@[^@\s]+\.[^@\s]+", evaluator["email"]
+            )
+            for evaluator in evaluators
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Every evaluator needs a name and valid email address.",
+            )
+        if not any(len(paths) == 1 for paths in files_by_roll.values()):
+            raise HTTPException(
+                status_code=400,
+                detail="No uniquely identified student files are available to distribute.",
+            )
+    return folder, files_by_roll, ignored_files, mappings, evaluators
+
+
+def _assign_evaluator_files(
+    files_by_roll: dict[str, list[Path]], evaluators: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    files = [
+        (roll_number, str(paths[0]))
+        for roll_number, paths in files_by_roll.items()
+        if len(paths) == 1
+    ]
+    random.SystemRandom().shuffle(files)
+    shuffled_evaluators = list(evaluators)
+    random.SystemRandom().shuffle(shuffled_evaluators)
+    return [
+        {
+            "roll_number": roll_number,
+            "file": filepath,
+            "evaluator_name": evaluator["name"],
+            "evaluator_email": evaluator["email"],
+            "status": "assigned",
+        }
+        for index, (roll_number, filepath) in enumerate(files)
+        for evaluator in [shuffled_evaluators[index % len(shuffled_evaluators)]]
+    ]
+
+
+def _file_status_rows(
+    folder: Path,
+    files_by_roll: dict[str, list[Path]],
+    mappings: list[MappingDict],
+    assignments: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    recipient_by_roll = {
+        row["roll_number"]: row["mail_account"] for row in mappings
+    }
+    roll_by_file = {
+        str(path): roll_number
+        for roll_number, paths in files_by_roll.items()
+        for path in paths
+    }
+    assignment_by_file = {
+        assignment["file"]: assignment for assignment in assignments or []
+    }
+    status_rows = []
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        roll_number = roll_by_file.get(str(path), "")
+        assignment = assignment_by_file.get(str(path))
+        status_rows.append({
+            "file": str(path),
+            "roll_number": roll_number,
+            "recipient": (
+                assignment["evaluator_email"]
+                if assignment
+                else recipient_by_roll.get(roll_number, "")
+            ),
+            "evaluator_name": assignment["evaluator_name"] if assignment else "",
+            "status": (
+                "ignored_no_roll_number"
+                if not roll_number
+                else "ambiguous"
+                if len(files_by_roll[roll_number]) > 1
+                else "assigned"
+                if assignment
+                else "not sent"
+            ),
+        })
+    return status_rows
 
 
 def _pick_folder(purpose: Literal["download", "upload"]) -> str:
@@ -556,7 +766,7 @@ def _run_download(test_id: str, selections: list[MessageSelection]) -> None:
                     message["account"],
                     credentials[message["account"]],
                     message["uid"],
-                    folder / test_id / _safe_account_folder(message["account"]),
+                    folder,
                 ): message
                 for message in messages
             }
@@ -614,10 +824,25 @@ def _run_upload(test_id: str) -> None:
         credentials = _accounts()
         upload_fields = test_run["upload_fields"]
         mapping_rows = upload_fields.get("mappings")
-        if mapping_rows is None:
+        send_mode = upload_fields.get("send_mode", "student")
+        assignments = upload_fields.get("assignments", [])
+        if send_mode == "evaluator":
+            mapping_rows = [
+                {
+                    "roll_number": assignment["roll_number"],
+                    "mail_account": assignment["evaluator_email"],
+                }
+                for assignment in assignments
+            ]
+        elif mapping_rows is None:
             mapping_rows = _read_mappings()
         mappings = [
-            MappingDict(row)
+            MappingDict(
+                {
+                    "roll_number": row["roll_number"],
+                    "mail_account": row["mail_account"],
+                }
+            )
             for row in mapping_rows
         ]
         files_by_roll, _ = _find_upload_files(Path(upload_fields["folder"]))
@@ -636,25 +861,34 @@ def _run_upload(test_id: str) -> None:
             errors=[{"message": str(error)}],
         )
         return
-    pending = [
-        (index, row)
-        for index, row in enumerate(mappings)
-        if row["roll_number"] in files_by_roll
-        and row["mail_account"]
-        and not _is_sent(row["sent"])
-        and not any(
-            update.get("roll_number") == row["roll_number"]
-            for update in test_run.get("updates", [])
-        )
-    ]
     errors: list[dict[str, Any]] = []
     unmatched: list[str] = []
-    ready: list[tuple[int, MappingDict, Path]] = []
-    for index, row in pending:
+    ready: list[tuple[MappingDict, Path]] = []
+    file_status = {
+        row["file"]: row
+        for row in upload_fields.get("file_status", [])
+    }
+    total = 0
+    for row in mappings:
         matches = files_by_roll.get(row["roll_number"], [])
         if not matches:
+            continue
+        if not row["mail_account"]:
+            for path in matches:
+                status_row = file_status.get(str(path))
+                if status_row:
+                    status_row.update(status="missing_mapping", recipient="")
+            continue
+        total += len(matches)
+        if len(matches) > 1:
             unmatched.append(row["roll_number"])
-        elif len(matches) > 1:
+            for path in matches:
+                status_row = file_status.get(str(path))
+                if status_row:
+                    status_row.update(
+                        status="ambiguous",
+                        recipient=row["mail_account"],
+                    )
             errors.append(
                 {
                     "roll_number": row["roll_number"],
@@ -662,14 +896,22 @@ def _run_upload(test_id: str) -> None:
                     "files": [path.name for path in matches],
                 }
             )
-        else:
-            ready.append((index, row, matches[0]))
-    operation = test_run["operations"]["upload"]
-    operation["progress"]["total"] = len(pending)
+            continue
+        path = matches[0]
+        status_row = file_status.get(str(path))
+        if status_row and status_row["status"] == "sent":
+            continue
+        if status_row:
+            status_row.update(status="sending", recipient=row["mail_account"])
+        ready.append((row, path))
+    _update_test(
+        test_id,
+        lambda current: current["upload_fields"].update(file_status=list(file_status.values())),
+    )
     _set_operation(
         test_id,
         "upload",
-        progress={"completed": len(pending) - len(ready), "total": len(pending)},
+        progress={"completed": total - len(ready), "total": total},
         errors=errors,
         unmatched=unmatched,
     )
@@ -689,20 +931,29 @@ def _run_upload(test_id: str) -> None:
                     attachment_path,
                     subject_template.format(roll_number=row["roll_number"]),
                     body,
-                ): (index, row, attachment_path)
-                for index, row, attachment_path in ready
+                ): (row, attachment_path)
+                for row, attachment_path in ready
             }
             for future in as_completed(futures):
-                index, row, attachment_path = futures[future]
+                row, attachment_path = futures[future]
                 try:
                     future.result()
-                    mappings[index]["sent"] = "sent"
-                    _write_mappings(mappings)
 
                     def mark_updated(current: dict[str, Any]) -> None:
-                        for mapping in current["upload_fields"]["mappings"]:
-                            if mapping["roll_number"] == row["roll_number"]:
-                                mapping["sent"] = "sent"
+                        for status_row in current["upload_fields"]["file_status"]:
+                            if status_row["file"] == str(attachment_path):
+                                status_row.update(
+                                    status="sent",
+                                    recipient=row["mail_account"],
+                                    error="",
+                                )
+                                break
+                        for assignment in current["upload_fields"].get(
+                            "assignments", []
+                        ):
+                            if assignment["file"] == str(attachment_path):
+                                assignment["status"] = "sent"
+                                break
                         current.setdefault("updates", []).append(
                             {
                                 "roll_number": row["roll_number"],
@@ -724,13 +975,31 @@ def _run_upload(test_id: str) -> None:
                         }
                     )
 
+                    def mark_failed(current: dict[str, Any]) -> None:
+                        for status_row in current["upload_fields"]["file_status"]:
+                            if status_row["file"] == str(attachment_path):
+                                status_row.update(
+                                    status="failed",
+                                    recipient=row["mail_account"],
+                                    error=str(error),
+                                )
+                                break
+                        for assignment in current["upload_fields"].get(
+                            "assignments", []
+                        ):
+                            if assignment["file"] == str(attachment_path):
+                                assignment.update(status="failed", error=str(error))
+                                break
+
+                    _update_test(test_id, mark_failed)
+
                 operation = _read_test(test_id)["operations"]["upload"]
                 _set_operation(
                     test_id,
                     "upload",
                     progress={
                         "completed": operation["progress"]["completed"] + 1,
-                        "total": len(pending),
+                        "total": total,
                     },
                     errors=errors,
                     unmatched=unmatched,
@@ -776,8 +1045,7 @@ def pick_folder(purpose: Literal["download", "upload"]) -> dict[str, str | None]
     return {"folder": str(Path(folder).resolve()) if folder else None}
 
 
-@app.get("/api/tests")
-def list_tests() -> dict[str, list[dict[str, Any]]]:
+def _list_test_records(kind: Literal["download", "upload"]) -> dict[str, list[dict[str, Any]]]:
     TESTS_DIR.mkdir(parents=True, exist_ok=True)
     tests = []
     for path in sorted(
@@ -786,9 +1054,23 @@ def list_tests() -> dict[str, list[dict[str, Any]]]:
         reverse=True,
     ):
         test_run = _read_test(path.stem)
+        test_kind = test_run.get("kind")
+        if test_kind is None:
+            test_kind = (
+                "upload"
+                if test_run["operations"]["upload"]["status"] != "idle"
+                or test_run.get("updates")
+                else "download"
+            )
+        if test_kind != kind:
+            continue
         tests.append(
             {
                 "id": test_run["id"],
+                "test_name": test_run.get("test_name", ""),
+                "upload_mode": test_run.get("upload_fields", {}).get(
+                    "send_mode", "student"
+                ),
                 "created_at": test_run["created_at"],
                 "message_count": len(test_run["messages"]),
                 "counts": test_run["counts"],
@@ -796,6 +1078,16 @@ def list_tests() -> dict[str, list[dict[str, Any]]]:
             }
         )
     return {"tests": tests}
+
+
+@app.get("/api/tests")
+def list_tests() -> dict[str, list[dict[str, Any]]]:
+    return _list_test_records("download")
+
+
+@app.get("/api/upload-runs")
+def list_upload_runs() -> dict[str, list[dict[str, Any]]]:
+    return _list_test_records("upload")
 
 
 @app.post("/api/tests", status_code=202)
@@ -821,6 +1113,8 @@ def create_test(request: SearchRequest) -> dict[str, Any]:
     test_id = str(uuid.uuid4())
     test_run: dict[str, Any] = {
         "id": test_id,
+        "kind": "download",
+        "test_name": request.test_name.strip(),
         "created_at": _now(),
         "search_fields": {
             "account": request.account,
@@ -833,9 +1127,13 @@ def create_test(request: SearchRequest) -> dict[str, Any]:
             "selected_messages": [],
         },
         "upload_fields": {
+            "send_mode": "student",
             "folder": "",
             "sender_account": "",
+            "evaluators": [],
+            "assignments": [],
             "files_by_roll": {},
+            "file_status": [],
             "ignored_files": [],
             "mappings": [],
             "subject_template": UPLOAD_SUBJECT_TEMPLATE,
@@ -955,6 +1253,38 @@ def get_mappings() -> dict[str, Any]:
     return {"columns": list(MAPPING_COLUMNS), "rows": _read_mappings()}
 
 
+@app.get("/api/evaluators")
+def get_evaluators() -> dict[str, Any]:
+    return {"rows": _read_evaluators()}
+
+
+@app.put("/api/evaluators")
+def update_evaluators(request: EvaluatorUpdate) -> dict[str, Any]:
+    seen_emails: set[str] = set()
+    rows: list[dict[str, str]] = []
+    for evaluator in request.rows:
+        name = evaluator.name.strip()
+        email_address = evaluator.email.strip()
+        if not name and not email_address:
+            continue
+        if not name:
+            raise HTTPException(status_code=400, detail="Every evaluator needs a name.")
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email_address):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Evaluator email is invalid: {email_address}",
+            )
+        if email_address.casefold() in seen_emails:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Evaluator email is duplicated: {email_address}",
+            )
+        seen_emails.add(email_address.casefold())
+        rows.append({"name": name, "email": email_address})
+    _write_evaluators(rows)
+    return {"rows": _read_evaluators()}
+
+
 @app.post("/api/mappings/discover")
 def discover_mappings(request: MappingDiscoveryRequest) -> dict[str, Any]:
     folder = Path(request.folder).expanduser().resolve()
@@ -967,7 +1297,6 @@ def discover_mappings(request: MappingDiscoveryRequest) -> dict[str, Any]:
             {
                 "roll_number": roll_number,
                 "mail_account": prior.get("mail_account", ""),
-                "sent": prior.get("sent", ""),
             }
         )
         if roll_number in existing:
@@ -1009,7 +1338,9 @@ def update_mappings(request: MappingUpdate) -> dict[str, Any]:
             )
         if row.roll_number.strip():
             seen_roll_numbers.add(row.roll_number.strip())
-        if row.roll_number.strip() and "@" not in row.mail_account:
+        if row.roll_number.strip() and row.mail_account.strip() and not re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+", row.mail_account.strip()
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=f"Recipient must be an email address: {row.mail_account}",
@@ -1019,7 +1350,6 @@ def update_mappings(request: MappingUpdate) -> dict[str, Any]:
             {
                 "roll_number": row.roll_number.strip(),
                 "mail_account": row.mail_account.strip(),
-                "sent": row.sent.strip(),
             }
         )
         for row in request.rows
@@ -1043,20 +1373,13 @@ def send_mappings(test_id: str, request: UploadRequest) -> dict[str, Any]:
             raise HTTPException(
                 status_code=409, detail="An upload is already running for this test."
             )
-        accounts = _accounts()
-        _require_single_account(accounts)
-        if request.sender_account not in accounts:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Sender account is not configured: {request.sender_account}",
-            )
-        folder = Path(request.folder).expanduser().resolve()
-        if not folder.is_dir():
-            raise HTTPException(
-                status_code=400, detail=f"Upload folder does not exist: {folder}"
-            )
-        files_by_roll, ignored_files = _find_upload_files(folder)
-        mapping_snapshot = _read_mappings()
+        (
+            folder,
+            files_by_roll,
+            ignored_files,
+            mapping_snapshot,
+            evaluator_snapshot,
+        ) = _prepare_upload(request)
         previous_upload = test_run.get("upload_fields", {})
         if test_run.get("updates") and (
             previous_upload.get("folder") != str(folder)
@@ -1067,19 +1390,47 @@ def send_mappings(test_id: str, request: UploadRequest) -> dict[str, Any]:
                 detail="This test ID already has successful uploads. Start a new test for a different upload folder or sender.",
             )
 
+        assignments = previous_upload.get("assignments", [])
+        if request.send_mode == "evaluator" and not assignments:
+            assignments = _assign_evaluator_files(files_by_roll, evaluator_snapshot)
+        file_status = _file_status_rows(
+            folder,
+            files_by_roll,
+            mapping_snapshot,
+            assignments if request.send_mode == "evaluator" else None,
+        )
+        if previous_upload.get("folder") == str(folder):
+            previous_file_status = {
+                item["file"]: item
+                for item in previous_upload.get("file_status", [])
+            }
+            for item in file_status:
+                previous = previous_file_status.get(item["file"])
+                if previous and previous.get("status") == "sent":
+                    item.update(
+                        status="sent",
+                        recipient=previous.get("recipient", item["recipient"]),
+                    )
+
         _update_test(
             test_id,
             lambda current: current.update(
+                kind="upload",
+                test_name=request.test_name.strip() or current.get("test_name", ""),
                 upload_fields={
+                    "send_mode": request.send_mode,
                     "folder": str(folder),
                     "sender_account": request.sender_account,
+                    "evaluators": evaluator_snapshot,
+                    "assignments": assignments,
+                    "file_status": file_status,
                     "files_by_roll": {
                         roll_number: [str(path) for path in paths]
                         for roll_number, paths in files_by_roll.items()
                     },
                     "ignored_files": ignored_files,
                     "mappings": mapping_snapshot,
-                    "subject_template": UPLOAD_SUBJECT_TEMPLATE,
+                    "subject_template": request.subject_template.strip(),
                     "body": UPLOAD_BODY,
                 }
             ),
@@ -1096,6 +1447,68 @@ def send_mappings(test_id: str, request: UploadRequest) -> dict[str, Any]:
         )
         _submit_job(test_id, "upload", _run_upload)
         return _read_test(test_id)
+
+
+@app.post("/api/upload-runs", status_code=202)
+def create_upload_run(request: UploadRequest) -> dict[str, Any]:
+    (
+        folder,
+        files_by_roll,
+        ignored_files,
+        mapping_snapshot,
+        evaluator_snapshot,
+    ) = _prepare_upload(request)
+    assignments = (
+        _assign_evaluator_files(files_by_roll, evaluator_snapshot)
+        if request.send_mode == "evaluator"
+        else []
+    )
+    test_id = str(uuid.uuid4())
+    created_at = _now()
+    test_run: dict[str, Any] = {
+        "id": test_id,
+        "kind": "upload",
+        "test_name": request.test_name.strip(),
+        "created_at": created_at,
+        "search_fields": {
+            "account": "",
+            "senders": [],
+            "download_folder": "",
+            "after_date": "",
+        },
+        "download_fields": {"output_folder": "", "selected_messages": []},
+        "upload_fields": {
+            "send_mode": request.send_mode,
+            "folder": str(folder),
+            "sender_account": request.sender_account,
+            "evaluators": evaluator_snapshot,
+            "assignments": assignments,
+            "files_by_roll": {
+                roll_number: [str(path) for path in paths]
+                for roll_number, paths in files_by_roll.items()
+            },
+            "file_status": _file_status_rows(
+                folder,
+                files_by_roll,
+                mapping_snapshot,
+                assignments if request.send_mode == "evaluator" else None,
+            ),
+            "ignored_files": ignored_files,
+            "mappings": mapping_snapshot,
+            "subject_template": UPLOAD_SUBJECT_TEMPLATE,
+            "body": UPLOAD_BODY,
+        },
+        "messages": [],
+        "updates": [],
+        "counts": {"found": 0, "downloaded": 0, "downloaded_files": 0, "updated": 0},
+        "operations": {
+            "search": _operation("completed"),
+            "download": _operation("completed"),
+            "upload": _operation(),
+        },
+    }
+    _write_test(test_run)
+    return send_mappings(test_id, request)
 
 
 app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="dashboard")
