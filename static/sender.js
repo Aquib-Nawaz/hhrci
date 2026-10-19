@@ -19,8 +19,16 @@ const studentDiscoveryControls = document.querySelector("#student-discovery-cont
 const evaluatorPanel = document.querySelector("#evaluator-panel");
 const evaluatorList = document.querySelector("#evaluator-list");
 const evaluatorStatus = document.querySelector("#evaluator-status");
+const assignmentPreviewButton = document.querySelector("#preview-evaluator-assignments");
+const assignmentPreviewStatus = document.querySelector("#assignment-preview-status");
+const assignmentPreviewPanel = document.querySelector("#assignment-preview");
+const assignmentList = document.querySelector("#assignment-list");
 let uploadFolderPath = "";
 let uploadInProgress = false;
+let evaluatorAssignments = [];
+let evaluatorSaveTimer = null;
+let evaluatorSaveRevision = 0;
+let evaluatorSaveQueue = Promise.resolve();
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -34,6 +42,60 @@ async function api(url, options = {}) {
 
 function delay(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function clearAssignmentPreview() {
+  evaluatorAssignments = [];
+  assignmentList.replaceChildren();
+  assignmentPreviewPanel.hidden = true;
+  assignmentPreviewStatus.textContent = "";
+  updateSendButton();
+}
+
+function persistEvaluators(revision, rows) {
+  const save = evaluatorSaveQueue.catch(() => {}).then(async () => {
+    const result = await api("/api/evaluators", {
+      method: "PUT",
+      body: JSON.stringify({ rows }),
+    });
+    if (revision === evaluatorSaveRevision) {
+      evaluatorStatus.textContent =
+        `Evaluator list saved to data/evaluators.csv (${result.rows.length} evaluator(s)).`;
+    }
+    return result.rows;
+  });
+  evaluatorSaveQueue = save;
+  return save;
+}
+
+function scheduleEvaluatorSave() {
+  window.clearTimeout(evaluatorSaveTimer);
+  const revision = ++evaluatorSaveRevision;
+  const rows = collectEvaluators();
+  const incomplete = rows.some((row) =>
+    !row.name ||
+    !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(row.email),
+  );
+  if (incomplete) {
+    evaluatorStatus.textContent =
+      "Enter both a name and valid email; the completed list saves automatically.";
+    return;
+  }
+  evaluatorStatus.textContent = "Saving evaluator list…";
+  evaluatorSaveTimer = window.setTimeout(() => {
+    persistEvaluators(revision, rows).catch((error) => {
+      if (revision === evaluatorSaveRevision) {
+        evaluatorStatus.textContent = error.message;
+      }
+    });
+  }, 500);
+}
+
+async function saveEvaluatorsNow() {
+  window.clearTimeout(evaluatorSaveTimer);
+  const revision = ++evaluatorSaveRevision;
+  evaluatorStatus.textContent = "Saving evaluator list…";
+  return persistEvaluators(revision, collectEvaluators());
 }
 
 function addMappingRow(mapping = {}) {
@@ -80,7 +142,11 @@ function addEvaluatorRow(evaluator = {}) {
     input.value = evaluator[field] || "";
     input.placeholder = placeholder;
     input.setAttribute("aria-label", `Evaluator ${field}`);
-    input.addEventListener("input", updateSendButton);
+    input.addEventListener("input", () => {
+      clearAssignmentPreview();
+      scheduleEvaluatorSave();
+      updateSendButton();
+    });
     cell.append(input);
     row.append(cell);
   }
@@ -91,6 +157,8 @@ function addEvaluatorRow(evaluator = {}) {
   removeButton.textContent = "Remove";
   removeButton.addEventListener("click", () => {
     row.remove();
+    clearAssignmentPreview();
+    scheduleEvaluatorSave();
     updateSendButton();
   });
   actionCell.append(removeButton);
@@ -133,6 +201,9 @@ async function loadEvaluators() {
   evaluatorList.replaceChildren();
   rows.forEach(addEvaluatorRow);
   if (!rows.length) addEvaluatorRow();
+  evaluatorStatus.textContent = rows.length
+    ? `Loaded ${rows.length} saved evaluator(s) from data/evaluators.csv.`
+    : "Evaluator names and emails will be saved automatically as you enter them.";
 }
 
 async function loadTests(selectedId = testRunSelect.value) {
@@ -157,9 +228,7 @@ async function loadAccounts() {
 
 function updateSendButton() {
   const readyForMode = sendMode.value === "evaluator"
-    ? collectEvaluators().some((evaluator) =>
-      evaluator.name && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(evaluator.email),
-    )
+    ? evaluatorAssignments.length > 0
     : collectMappings().some((mapping) =>
       /^\d{5}$/.test(mapping.roll_number) &&
       /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mapping.mail_account),
@@ -170,6 +239,7 @@ function updateSendButton() {
 
 function updateSendModePanels() {
   const isEvaluatorMode = sendMode.value === "evaluator";
+  clearAssignmentPreview();
   studentMappingPanel.hidden = isEvaluatorMode;
   studentDiscoveryControls.hidden = isEvaluatorMode;
   evaluatorPanel.hidden = !isEvaluatorMode;
@@ -198,6 +268,8 @@ async function showSavedTest(testId) {
   uploadFolderLabel.textContent = uploadFolderPath || "No folder selected";
   uploadSubject.value = upload.subject_template || "Attachment for roll number {roll_number}";
   if (upload.sender_account) senderAccount.value = upload.sender_account;
+  evaluatorAssignments = upload.assignments || [];
+  renderAssignmentPreview(evaluatorAssignments);
   updateSendButton();
   displayProgress(testRun);
 
@@ -206,6 +278,26 @@ async function showSavedTest(testId) {
   } else if (upload.folder && upload.sender_account) {
     sendStatus.textContent = "Saved upload settings restored.";
   }
+}
+
+function renderAssignmentPreview(assignments) {
+  assignmentList.replaceChildren();
+  for (const assignment of assignments) {
+    const row = document.createElement("tr");
+    for (const value of [
+      assignment.roll_number,
+      assignment.file.split(/[\\/]/).pop(),
+      assignment.evaluator_name,
+      assignment.evaluator_email,
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    assignmentList.append(row);
+  }
+  assignmentPreviewPanel.hidden = assignments.length === 0;
+  updateSendButton();
 }
 
 function displayProgress(testRun) {
@@ -276,7 +368,10 @@ async function pollUpload(testId) {
 }
 
 document.querySelector("#add-row").addEventListener("click", () => addMappingRow());
-document.querySelector("#add-evaluator").addEventListener("click", () => addEvaluatorRow());
+document.querySelector("#add-evaluator").addEventListener("click", () => {
+  clearAssignmentPreview();
+  addEvaluatorRow();
+});
 senderAccount.addEventListener("change", updateSendButton);
 sendMode.addEventListener("change", updateSendModePanels);
 
@@ -290,6 +385,7 @@ document.querySelector("#pick-upload-folder").addEventListener("click", async ()
     }
     uploadFolderPath = folder;
     uploadFolderLabel.textContent = folder;
+    clearAssignmentPreview();
     discoveryStatus.textContent = "";
     updateSendButton();
   } catch (error) {
@@ -344,18 +440,40 @@ document.querySelector("#save-mappings").addEventListener("click", async () => {
 });
 
 document.querySelector("#save-evaluators").addEventListener("click", async () => {
-  evaluatorStatus.textContent = "Saving evaluators…";
   try {
-    const { rows } = await api("/api/evaluators", {
-      method: "PUT",
-      body: JSON.stringify({ rows: collectEvaluators() }),
-    });
-    evaluatorList.replaceChildren();
-    rows.forEach(addEvaluatorRow);
-    if (!rows.length) addEvaluatorRow();
-    evaluatorStatus.textContent = "Evaluator list saved.";
+    await saveEvaluatorsNow();
+    clearAssignmentPreview();
   } catch (error) {
     evaluatorStatus.textContent = error.message;
+  }
+});
+
+assignmentPreviewButton.addEventListener("click", async () => {
+  assignmentPreviewButton.disabled = true;
+  assignmentPreviewStatus.textContent = "Saving evaluators and randomizing assignments…";
+  try {
+    if (!uploadFolderPath) throw new Error("Choose the folder containing student copies first.");
+    await saveEvaluatorsNow();
+    clearAssignmentPreview();
+    const preview = await api("/api/upload-preview", {
+      method: "POST",
+      body: JSON.stringify({
+        test_name: document.querySelector("#test-name").value.trim(),
+        folder: uploadFolderPath,
+        sender_account: senderAccount.value,
+        subject_template: uploadSubject.value.trim(),
+        send_mode: "evaluator",
+      }),
+    });
+    evaluatorAssignments = preview.assignments;
+    renderAssignmentPreview(evaluatorAssignments);
+    assignmentPreviewStatus.textContent =
+      `${evaluatorAssignments.length} copy assignment(s) ready. Review them, then start upload.`;
+  } catch (error) {
+    clearAssignmentPreview();
+    assignmentPreviewStatus.textContent = error.message;
+  } finally {
+    assignmentPreviewButton.disabled = false;
   }
 });
 
@@ -386,12 +504,7 @@ sendButton.addEventListener("click", async () => {
       rows.forEach(addMappingRow);
       if (!rows.length) addMappingRow();
     } else {
-      const { rows } = await api("/api/evaluators", {
-        method: "PUT",
-        body: JSON.stringify({ rows: collectEvaluators() }),
-      });
-      evaluatorList.replaceChildren();
-      rows.forEach(addEvaluatorRow);
+      await saveEvaluatorsNow();
     }
     const testRun = await api("/api/upload-runs", {
       method: "POST",
@@ -401,6 +514,7 @@ sendButton.addEventListener("click", async () => {
         sender_account: senderAccount.value,
         subject_template: uploadSubject.value.trim(),
         send_mode: sendMode.value,
+        assignments: evaluatorAssignments,
       }),
     });
     await loadTests(testRun.id);

@@ -55,10 +55,14 @@ and sending local attachment files through an editable CSV mapping.
   The upload page shows a collapsible per-file status list for the selected run.
   Scanning a folder preserves existing recipient mappings.
   Select **Randomly distribute to evaluators** to save a separate evaluator
-  name/email list in `data/evaluators.csv` and randomly distribute uniquely
-  identified student files as evenly as possible across them. Each file is
-  assigned to no more than one evaluator; each run records the exact
+  name/email list in `data/evaluators.csv`. The roster autosaves after edits
+  and is restored when the upload page is reopened; incomplete rows are not
+  saved. The dashboard can also save the roster immediately. It randomly
+  distributes uniquely identified student files as evenly as possible across
+  evaluators. Each file is assigned to no more than one evaluator; each run records the exact
   file-to-evaluator assignments and send status.
+  Generate and review the assignment preview before starting the send. The
+  previewed assignment is validated and persisted unchanged in the upload run.
   Starting an upload creates a dedicated upload-run JSON record, independent of
   download/search test records. The upload history selector lists upload runs
   only.

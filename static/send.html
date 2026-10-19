@@ -104,7 +104,7 @@
           </div>
           <button id="add-evaluator" class="button button-secondary" type="button">Add evaluator</button>
         </div>
-        <p class="help-text">The app randomly shuffles eligible files and distributes them as evenly as possible. Each student file is assigned to at most one evaluator. The assignment is saved with this upload test.</p>
+        <p class="help-text">Evaluator names and emails are saved automatically to <code>data/evaluators.csv</code> as you edit them and restored when you return. Enter both fields for each evaluator; incomplete rows are not saved. Generate and review the random copy-to-evaluator assignment before starting. Eligible files are distributed as evenly as possible, and each student file is assigned to at most one evaluator.</p>
         <div class="table-wrap">
           <table>
             <thead>
@@ -118,8 +118,29 @@
           </table>
         </div>
         <div class="actions">
-          <button id="save-evaluators" class="button button-secondary" type="button">Save evaluators</button>
+          <button id="save-evaluators" class="button button-secondary" type="button">Save now</button>
           <span id="evaluator-status" class="status" role="status"></span>
+        </div>
+        <div class="actions">
+          <button id="preview-evaluator-assignments" class="button button-secondary" type="button">Generate random assignment preview</button>
+          <span id="assignment-preview-status" class="status" role="status"></span>
+        </div>
+        <div id="assignment-preview" hidden>
+          <h3>Copy-to-evaluator assignment preview</h3>
+          <p class="help-text">Review this list before starting. This exact assignment will be saved in the upload run.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Roll number</th>
+                  <th>Copy / file</th>
+                  <th>Evaluator</th>
+                  <th>Evaluator email</th>
+                </tr>
+              </thead>
+              <tbody id="assignment-list"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -155,7 +176,7 @@
           <select id="test-run"><option value="">Choose an upload run</option></select>
         </label>
         <p id="test-run-summary" class="run-summary">Each upload creates its own record, separate from mail download/search runs.</p>
-        <p class="help-text">Each local file is sent as a new email with subject “Attachment for roll number {roll_number}” and body “Please find the attached file.” The upload folder and sender account are stored in that upload run’s JSON record.</p>
+        <p class="help-text">Each selected local file is sent as a new email using the subject above and body “Please find the attached file.” The upload folder, assignment, sender account, and per-file status are stored in that upload run’s JSON record.</p>
         <div class="actions">
           <button id="send-mappings" class="button button-primary" type="button" disabled>Start upload</button>
           <span id="send-status" class="status" role="status"></span>

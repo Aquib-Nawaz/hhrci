@@ -85,6 +85,13 @@ class EvaluatorUpdate(BaseModel):
     rows: list[EvaluatorRow]
 
 
+class EvaluatorAssignment(BaseModel):
+    roll_number: str
+    file: str
+    evaluator_name: str
+    evaluator_email: str
+
+
 class MappingDiscoveryRequest(BaseModel):
     folder: str = Field(min_length=1)
 
@@ -95,6 +102,7 @@ class UploadRequest(BaseModel):
     sender_account: str = Field(min_length=1)
     subject_template: str = Field(default=UPLOAD_SUBJECT_TEMPLATE, min_length=1)
     send_mode: Literal["student", "evaluator"] = "student"
+    assignments: list[EvaluatorAssignment] = Field(default_factory=list)
 
 
 def _now() -> str:
@@ -586,6 +594,55 @@ def _assign_evaluator_files(
         for index, (roll_number, filepath) in enumerate(files)
         for evaluator in [shuffled_evaluators[index % len(shuffled_evaluators)]]
     ]
+
+
+def _validated_evaluator_assignments(
+    files_by_roll: dict[str, list[Path]],
+    evaluators: list[dict[str, str]],
+    assignments: list[EvaluatorAssignment],
+) -> list[dict[str, str]]:
+    expected_files = {
+        (roll_number, str(paths[0]))
+        for roll_number, paths in files_by_roll.items()
+        if len(paths) == 1
+    }
+    evaluator_by_identity = {
+        (evaluator["name"], evaluator["email"]): evaluator
+        for evaluator in evaluators
+    }
+    received_files: set[tuple[str, str]] = set()
+    validated: list[dict[str, str]] = []
+    for assignment in assignments:
+        file_key = (assignment.roll_number, str(Path(assignment.file).resolve()))
+        if file_key not in expected_files or file_key in received_files:
+            raise HTTPException(
+                status_code=400,
+                detail="Evaluator assignments must include each eligible file exactly once.",
+            )
+        evaluator = evaluator_by_identity.get(
+            (assignment.evaluator_name, assignment.evaluator_email)
+        )
+        if evaluator is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Every assigned evaluator must be in the saved evaluator list.",
+            )
+        received_files.add(file_key)
+        validated.append(
+            {
+                "roll_number": assignment.roll_number,
+                "file": file_key[1],
+                "evaluator_name": evaluator["name"],
+                "evaluator_email": evaluator["email"],
+                "status": "assigned",
+            }
+        )
+    if received_files != expected_files:
+        raise HTTPException(
+            status_code=400,
+            detail="Evaluator assignments must include each eligible file exactly once.",
+        )
+    return validated
 
 
 def _file_status_rows(
@@ -1285,6 +1342,27 @@ def update_evaluators(request: EvaluatorUpdate) -> dict[str, Any]:
     return {"rows": _read_evaluators()}
 
 
+@app.post("/api/upload-preview")
+def preview_upload(request: UploadRequest) -> dict[str, Any]:
+    if request.send_mode != "evaluator":
+        raise HTTPException(
+            status_code=400,
+            detail="Assignment preview is only available in evaluator mode.",
+        )
+    folder, files_by_roll, ignored_files, mappings, evaluators = _prepare_upload(
+        request
+    )
+    assignments = _assign_evaluator_files(files_by_roll, evaluators)
+    return {
+        "folder": str(folder),
+        "assignments": assignments,
+        "file_status": _file_status_rows(
+            folder, files_by_roll, mappings, assignments
+        ),
+        "ignored_files": ignored_files,
+    }
+
+
 @app.post("/api/mappings/discover")
 def discover_mappings(request: MappingDiscoveryRequest) -> dict[str, Any]:
     folder = Path(request.folder).expanduser().resolve()
@@ -1459,7 +1537,15 @@ def create_upload_run(request: UploadRequest) -> dict[str, Any]:
         evaluator_snapshot,
     ) = _prepare_upload(request)
     assignments = (
-        _assign_evaluator_files(files_by_roll, evaluator_snapshot)
+        _validated_evaluator_assignments(
+            files_by_roll, evaluator_snapshot, request.assignments
+        )
+        if request.send_mode == "evaluator" and request.assignments
+        else         _validated_evaluator_assignments(
+            files_by_roll, evaluator_snapshot, request.assignments
+        )
+        if request.send_mode == "evaluator" and request.assignments
+        else _assign_evaluator_files(files_by_roll, evaluator_snapshot)
         if request.send_mode == "evaluator"
         else []
     )
