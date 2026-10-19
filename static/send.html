@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mail Desk — Send</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/sender.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">Mail Desk</a>
+      <nav aria-label="Main navigation">
+        <a href="/">Download mail</a>
+        <a class="active" href="/send">Upload attachments</a>
+      </nav>
+    </header>
+    <main>
+      <section class="intro">
+        <p class="eyebrow">MAIL WORKSPACE</p>
+        <h1>Upload attachments by roll number</h1>
+        <p>Choose a local folder, generate recipient mappings from filenames, then send each uniquely matched file to its recipient.</p>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LOCAL ATTACHMENTS</p>
+            <h2>Choose upload source</h2>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label class="field">
+            Folder containing attachments
+            <div class="folder-picker">
+              <button id="pick-upload-folder" class="button button-secondary" type="button">Choose folder…</button>
+              <span id="upload-folder" class="folder-path" aria-live="polite">No folder selected</span>
+            </div>
+            <small>Files are matched by one standalone 5-digit roll number in their filename. Folders are scanned recursively.</small>
+          </label>
+          <label class="field">
+            Send using Gmail account
+            <select id="sender-account" required></select>
+            <small>This account will send the local attachment to each mapping recipient.</small>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="discover-mappings" class="button button-secondary" type="button">Scan folder and generate mappings</button>
+          <span id="discovery-status" class="status" role="status"></span>
+        </div>
+        <div id="discovery-results" class="notice" hidden></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">CSV MAPPING</p>
+            <h2>Recipients</h2>
+          </div>
+          <button id="add-row" class="button button-secondary" type="button">Add mapping</button>
+        </div>
+        <p class="help-text">The CSV is stored locally at <code>data/mappings.csv</code> with columns <code>roll_number,mail_account,sent</code>. Enter the recipient email for each detected roll number. If multiple files match the same number, none of them are sent until the folder is unambiguous. “Sent” shows the last successful send; a test ID will not send the same roll number twice.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>5-digit roll number</th>
+                <th>Recipient email</th>
+                <th>Sent status</th>
+                <th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="mapping-list"></tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <button id="save-mappings" class="button button-secondary" type="button">Save CSV</button>
+          <span id="mapping-status" class="status" role="status"></span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">FORWARD UNSENT ROWS</p>
+            <h2>Choose a test record</h2>
+          </div>
+        </div>
+        <label class="field">
+          Test record for operation history
+          <select id="test-run"><option value="">Choose a saved run</option></select>
+        </label>
+        <p id="test-run-summary" class="run-summary">Select a test record to see its saved search and upload progress.</p>
+        <p class="help-text">Each local file is sent as a new email with subject “Attachment for roll number {roll_number}” and body “Please find the attached file.” Upload folder and sender account are saved to the selected test’s JSON record.</p>
+        <div class="actions">
+          <button id="send-mappings" class="button button-primary" type="button" disabled>Upload unsent attachments</button>
+          <span id="send-status" class="status" role="status"></span>
+        </div>
+        <div id="send-results" class="notice" hidden></div>
+      </section>
+    </main>
+  </body>
+</html>

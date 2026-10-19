@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mail Desk — Download</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/downloader.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">Mail Desk</a>
+      <nav aria-label="Main navigation">
+        <a class="active" href="/">Download mail</a>
+        <a href="/send">Upload attachments</a>
+      </nav>
+    </header>
+    <main>
+      <section class="intro">
+        <p class="eyebrow">MAIL WORKSPACE</p>
+        <h1>Find and download attachments</h1>
+        <p>Search one Gmail inbox by one or more senders, review matching messages, then save attachments locally.</p>
+      </section>
+
+      <section class="panel">
+        <form id="search-form">
+          <div class="form-grid">
+            <label class="field">
+              Gmail account
+              <select id="account" name="account" required></select>
+              <small>This is the single inbox searched.</small>
+            </label>
+            <label class="field">
+              Sender email addresses
+              <input id="senders" name="senders" type="text" placeholder="sender1@example.com, sender2@example.com">
+              <small>Separate multiple sender addresses with commas. Leave blank to search all senders.</small>
+            </label>
+            <label class="field">
+              Received on or after
+              <input id="after-date" name="after_date" type="date" required>
+            </label>
+          </div>
+          <div class="actions">
+            <button class="button button-primary" type="submit">Search inbox</button>
+            <span id="search-status" class="status" role="status"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel results-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">TEST RUN</p>
+            <h2>Messages</h2>
+          </div>
+          <label class="history-field">
+            Saved runs
+            <select id="test-history"><option value="">Choose a saved run</option></select>
+          </label>
+        </div>
+        <div id="run-summary" class="run-summary" aria-live="polite">Search to create a persistent test run.</div>
+        <div id="error-list" class="notice notice-error" hidden></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><span class="sr-only">Select</span></th>
+                <th>Sender</th>
+                <th>Subject</th>
+                <th>Account</th>
+                <th>Date</th>
+                <th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="message-list">
+              <tr><td colspan="6" class="empty-state">No messages loaded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <div class="field field-wide">
+            <span>Attachment download folder</span>
+            <div class="folder-picker">
+              <button id="pick-download-folder" class="button button-secondary" type="button">Choose folder…</button>
+              <span id="download-folder" class="folder-path" aria-live="polite">Choose a folder after searching.</span>
+            </div>
+            <small>Attachments are saved here, grouped by test ID and Gmail account.</small>
+          </div>
+          <button id="download-selected" class="button button-primary" type="button" disabled>Download selected attachments</button>
+          <span id="download-status" class="status" role="status"></span>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
