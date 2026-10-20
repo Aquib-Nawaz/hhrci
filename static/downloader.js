@@ -174,7 +174,7 @@ async function initialize() {
   try {
     const { accounts } = await api("/api/accounts");
     if (!accounts.length) {
-      searchStatus.textContent = "Set GMAIL_USER in .env, restart the app, and connect the Gmail API.";
+      searchStatus.textContent = "Connect your Gmail account using the Connect Gmail API button.";
     }
     accountSelect.replaceChildren(new Option("Choose Gmail account", ""));
     for (const account of accounts) accountSelect.add(new Option(account, account));

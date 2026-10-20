@@ -30,7 +30,8 @@ gmailConnectButton.addEventListener("click", async () => {
     if (!response.ok) {
       throw new Error(result.detail || `Request failed (${response.status})`);
     }
-    gmailConnectionStatus.textContent = result.message;
+    window.location.reload();
+    return;
   } catch (error) {
     connectError = error.message;
   }

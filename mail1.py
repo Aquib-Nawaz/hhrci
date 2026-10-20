@@ -63,75 +63,7 @@ def _save_gmail_credentials(credentials: Credentials) -> None:
         token_file.write(credentials.to_json())
 
 
-def gmail_status() -> dict[str, Any]:
-    client_secrets = _google_client_secrets_path()
-    if not client_secrets.is_file():
-        return {
-            "configured": False,
-            "connected": False,
-            "message": (
-                "Add a Google OAuth Desktop client JSON file at "
-                f"{client_secrets} to enable Gmail API access."
-            ),
-        }
-    if not _GMAIL_TOKEN_PATH.is_file():
-        return {
-            "configured": True,
-            "connected": False,
-            "message": "Google Gmail API is ready to connect.",
-        }
-    try:
-        credentials = Credentials.from_authorized_user_file(
-            str(_GMAIL_TOKEN_PATH), GMAIL_SCOPES
-        )
-    except (GoogleAuthError, OSError, ValueError) as error:
-        return {
-            "configured": True,
-            "connected": False,
-            "message": f"Could not read saved Gmail authorization: {error}",
-        }
-    if not credentials.has_scopes(GMAIL_SCOPES):
-        return {
-            "configured": True,
-            "connected": False,
-            "message": "Gmail authorization needs to be renewed with Gmail access.",
-        }
-    return {
-        "configured": True,
-        "connected": credentials.valid or credentials.refresh_token is not None,
-        "message": "Gmail API is connected."
-        if credentials.valid or credentials.refresh_token
-        else "Gmail authorization expired; connect again.",
-    }
-
-
-def connect_gmail() -> dict[str, Any]:
-    client_secrets = _google_client_secrets_path()
-    if not client_secrets.is_file():
-        raise RuntimeError(
-            "Google Gmail API is not configured. Add an OAuth Desktop client JSON "
-            f"file at {client_secrets}."
-        )
-    try:
-        flow = InstalledAppFlow.from_client_secrets_file(
-            str(client_secrets), GMAIL_SCOPES
-        )
-        credentials = flow.run_local_server(
-            host="127.0.0.1",
-            port=0,
-            open_browser=True,
-            access_type="offline",
-            prompt="consent",
-        )
-        if not isinstance(credentials, Credentials):
-            raise RuntimeError("Google returned an unsupported Gmail credential type.")
-        _save_gmail_credentials(credentials)
-    except (GoogleAuthError, OSError, ValueError) as error:
-        raise RuntimeError(f"Could not connect the Gmail API: {error}") from error
-    return gmail_status()
-
-
-def _gmail_service(gmail_user: str) -> Any:
+def _gmail_credentials() -> Credentials:
     client_secrets = _google_client_secrets_path()
     if not client_secrets.is_file():
         raise RuntimeError(
@@ -162,7 +94,11 @@ def _gmail_service(gmail_user: str) -> Any:
                 )
         except (GoogleAuthError, OSError, ValueError) as error:
             raise RuntimeError(f"Could not load Gmail authorization: {error}") from error
+    return credentials
 
+
+def _gmail_service(gmail_user: str | None = None) -> tuple[Any, str]:
+    credentials = _gmail_credentials()
     try:
         service = build(
             "gmail",
@@ -174,12 +110,83 @@ def _gmail_service(gmail_user: str) -> Any:
     except HttpError as error:
         raise RuntimeError(f"Gmail API request failed: {error}") from error
     profile_email = profile.get("emailAddress", "")
-    if profile_email.casefold() != gmail_user.casefold():
+    if not profile_email:
+        raise RuntimeError("Gmail API did not return the connected account address.")
+    if gmail_user and profile_email.casefold() != gmail_user.casefold():
         raise RuntimeError(
-            "The connected Gmail account does not match GMAIL_USER "
-            f"({profile_email or 'unknown account'})."
+            "The connected Gmail account does not match the account saved in this "
+            f"test run ({profile_email}). Reconnect the correct account."
         )
-    return service
+    return service, profile_email
+
+
+def gmail_account() -> str | None:
+    if not _GMAIL_TOKEN_PATH.is_file():
+        return None
+    _, profile_email = _gmail_service()
+    return profile_email
+
+
+def gmail_status() -> dict[str, Any]:
+    client_secrets = _google_client_secrets_path()
+    if not client_secrets.is_file():
+        return {
+            "configured": False,
+            "connected": False,
+            "email": None,
+            "message": (
+                "Add a Google OAuth Desktop client JSON file at "
+                f"{client_secrets} to enable Gmail API access."
+            ),
+        }
+    try:
+        email_address = gmail_account()
+    except RuntimeError as error:
+        return {
+            "configured": True,
+            "connected": False,
+            "email": None,
+            "message": str(error),
+        }
+    if email_address is None:
+        return {
+            "configured": True,
+            "connected": False,
+            "email": None,
+            "message": "Google Gmail API is ready to connect.",
+        }
+    return {
+        "configured": True,
+        "connected": True,
+        "email": email_address,
+        "message": f"Gmail API connected as {email_address}.",
+    }
+
+
+def connect_gmail() -> dict[str, Any]:
+    client_secrets = _google_client_secrets_path()
+    if not client_secrets.is_file():
+        raise RuntimeError(
+            "Google Gmail API is not configured. Add an OAuth Desktop client JSON "
+            f"file at {client_secrets}."
+        )
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(client_secrets), GMAIL_SCOPES
+        )
+        credentials = flow.run_local_server(
+            host="127.0.0.1",
+            port=0,
+            open_browser=True,
+            access_type="offline",
+            prompt="select_account consent",
+        )
+        if not isinstance(credentials, Credentials):
+            raise RuntimeError("Google returned an unsupported Gmail credential type.")
+        _save_gmail_credentials(credentials)
+    except (GoogleAuthError, OSError, ValueError) as error:
+        raise RuntimeError(f"Could not connect the Gmail API: {error}") from error
+    return gmail_status()
 
 
 def search_emails(
@@ -188,7 +195,7 @@ def search_emails(
     senders: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Return message headers matching the date and any specified senders."""
-    service = _gmail_service(gmail_user)
+    service, _ = _gmail_service(gmail_user)
     after_query = f"after:{after_date.strftime('%Y/%m/%d')}"
     queries = (
         [f"{after_query} from:{sender}" for sender in senders]
@@ -252,7 +259,7 @@ def search_emails(
 
 
 def _fetch_message(gmail_user: str, uid: str) -> Message:
-    service = _gmail_service(gmail_user)
+    service, _ = _gmail_service(gmail_user)
     try:
         response = (
             service.users()
@@ -373,7 +380,7 @@ def download_attachments(
 
 
 def _send_message(gmail_user: str, message: Message) -> None:
-    service = _gmail_service(gmail_user)
+    service, _ = _gmail_service(gmail_user)
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
     try:
         service.users().messages().send(

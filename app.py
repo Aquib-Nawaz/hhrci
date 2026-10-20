@@ -112,38 +112,18 @@ def _now() -> str:
 
 
 def _accounts() -> dict[str, str]:
-    configured = os.getenv("GMAIL_ACCOUNTS")
-    if configured:
-        try:
-            value = json.loads(configured)
-        except json.JSONDecodeError as error:
-            raise HTTPException(
-                status_code=500,
-                detail="GMAIL_ACCOUNTS must be a JSON object mapping email addresses to values.",
-            ) from error
-        if not isinstance(value, dict) or not all(
-            isinstance(email_address, str)
-            and isinstance(password, str)
-            and email_address.strip()
-            for email_address, password in value.items()
-        ):
-            raise HTTPException(
-                status_code=500,
-                detail="GMAIL_ACCOUNTS must map non-empty email addresses to strings.",
-            )
-        return {address: "" for address in value}
-
-    user = os.getenv("GMAIL_USER")
-    if user:
-        return {user: ""}
-    return {}
+    try:
+        account = mail1.gmail_account()
+    except RuntimeError as error:
+        raise HTTPException(status_code=401, detail=str(error)) from error
+    return {account: ""} if account else {}
 
 
 def _require_single_account(accounts: dict[str, str]) -> str:
     if len(accounts) != 1:
         raise HTTPException(
-            status_code=500,
-            detail="Configure exactly one Gmail address using GMAIL_USER or a one-entry GMAIL_ACCOUNTS object.",
+            status_code=401,
+            detail="Connect one Gmail account using the Connect Gmail API button.",
         )
     return next(iter(accounts))
 
