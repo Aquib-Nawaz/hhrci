@@ -372,65 +372,6 @@ def download_attachments(
     return saved_files
 
 
-def forward_matching_email(
-    gmail_user: str,
-    uid: str,
-    recipient: str,
-    attachment_match: str,
-) -> bool:
-    """Forward a matching message with its attachments; return False if unmatched."""
-    message = _fetch_message(gmail_user, uid)
-    attachments = _attachment_parts(message)
-    token = Path(attachment_match).stem.casefold().strip()
-    if not token or not any(token in Path(name).name.casefold() for name, _ in attachments):
-        return False
-
-    body_text = ""
-    if message.is_multipart():
-        for part in message.walk():
-            if part.get_content_type() == "text/plain" and not part.get_filename():
-                payload = part.get_payload(decode=True)
-                if isinstance(payload, bytes):
-                    charset = part.get_content_charset() or "utf-8"
-                    body_text = payload.decode(charset, errors="replace")
-                    break
-    else:
-        payload = message.get_payload(decode=True)
-        if isinstance(payload, bytes):
-            charset = message.get_content_charset() or "utf-8"
-            body_text = payload.decode(charset, errors="replace")
-
-    forwarded = MIMEMultipart()
-    forwarded["From"] = gmail_user
-    forwarded["To"] = recipient
-    forwarded["Subject"] = f"Fwd: {_decode_header_value(message.get('Subject'))}"
-    forwarded.attach(
-        MIMEText(
-            "Forwarded message\n"
-            f"From: {_decode_header_value(message.get('From'))}\n"
-            f"Date: {_decode_header_value(message.get('Date'))}\n"
-            f"Subject: {_decode_header_value(message.get('Subject'))}\n\n"
-            f"{body_text}",
-            "plain",
-        )
-    )
-
-    for filename, part in attachments:
-        payload = part.get_payload(decode=True)
-        if not isinstance(payload, bytes):
-            raise RuntimeError(f"Attachment {filename} has no decoded byte payload.")
-        attachment = MIMEBase(
-            part.get_content_maintype(), part.get_content_subtype()
-        )
-        attachment.set_payload(payload)
-        encoders.encode_base64(attachment)
-        attachment.add_header("Content-Disposition", "attachment", filename=filename)
-        forwarded.attach(attachment)
-
-    _send_message(gmail_user, forwarded)
-    return True
-
-
 def _send_message(gmail_user: str, message: Message) -> None:
     service = _gmail_service(gmail_user)
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
@@ -460,12 +401,36 @@ def send_attachment(
     message["From"] = gmail_user
     message["To"] = recipient
     message["Subject"] = subject or f"Attachment for roll number {roll_number}"
+    html_body: str | None = None
     if path.stat().st_size > drive_storage.gmail_attachment_limit_bytes():
         drive_link = drive_storage.upload_file_for_recipient(path, recipient)
         body = (
             f"{body}\n\nThe file is too large to attach to this email. "
             f"Download it from Google Drive: {drive_link}\n"
             f"Drive access has been granted to {recipient}."
+        )
+        escaped_name = html.escape(path.name, quote=True)
+        escaped_link = html.escape(drive_link, quote=True)
+        html_body = (
+            '<table role="presentation" cellpadding="0" cellspacing="0" '
+            'style="border-collapse:collapse;margin-top:16px;">'
+            "<tr><td>"
+            f'<a href="{escaped_link}" style="display:inline-block;'
+            "text-decoration:none;color:#202124;"
+            'font-family:Arial,sans-serif;">'
+            '<table role="presentation" cellpadding="0" cellspacing="0" '
+            'style="border:1px solid #dadce0;border-radius:4px;'
+            'background:#f8f9fa;border-collapse:separate;">'
+            "<tr>"
+            '<td style="padding:12px 10px;color:#1a73e8;'
+            'font-size:20px;line-height:24px;">&#128196;</td>'
+            f'<td style="padding:12px 14px 12px 4px;font-size:14px;'
+            f'line-height:20px;">{escaped_name}</td>'
+            "</tr></table></a>"
+            "</td></tr></table>"
+            '<p style="color:#5f6368;font:12px Arial,sans-serif;">'
+            f"Drive access has been granted to {html.escape(recipient)}."
+            "</p>"
         )
     else:
         mime_type, _ = mimetypes.guess_type(path.name)
@@ -479,7 +444,20 @@ def send_attachment(
             "Content-Disposition", "attachment", filename=path.name
         )
         message.attach(attachment)
-    message.attach(MIMEText(body, "plain", "utf-8"))
+    if html_body is None:
+        message.attach(MIMEText(body, "plain", "utf-8"))
+    else:
+        body_part = MIMEMultipart("alternative")
+        body_part.attach(MIMEText(body, "plain", "utf-8"))
+        body_part.attach(
+            MIMEText(
+                f"<html><body><p>{html.escape(body).replace(chr(10), '<br>')}</p>"
+                f"{html_body}</body></html>",
+                "html",
+                "utf-8",
+            )
+        )
+        message.attach(body_part)
 
     _send_message(gmail_user, message)
 
