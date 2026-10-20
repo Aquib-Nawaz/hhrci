@@ -101,6 +101,26 @@ h1 {
   box-shadow: 0 5px 20px rgb(32 48 74 / 4%);
 }
 
+.drive-connection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.drive-connection h2 {
+  margin-bottom: 8px;
+}
+
+.drive-connection .help-text {
+  margin-bottom: 0;
+}
+
+.drive-connection .actions {
+  flex-shrink: 0;
+  margin-top: 0;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -396,6 +416,11 @@ code {
   }
 
   .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .drive-connection {
     align-items: flex-start;
     flex-direction: column;
   }

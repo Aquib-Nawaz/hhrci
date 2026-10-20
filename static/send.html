@@ -6,6 +6,8 @@
     <title>Mail Desk — Send</title>
     <link rel="stylesheet" href="/static/styles.css">
     <script src="/static/sender.js" defer></script>
+    <script src="/static/drive.js" defer></script>
+    <script src="/static/gmail-auth.js" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -20,6 +22,28 @@
         <p class="eyebrow">MAIL WORKSPACE</p>
         <h1>Upload attachments by roll number</h1>
         <p>Choose a local folder, generate recipient mappings from filenames, then send each uniquely matched file to its recipient.</p>
+      </section>
+
+      <section class="panel drive-connection">
+        <div>
+          <h2>Google Drive access</h2>
+          <p class="help-text">Connect Drive to send files over the configured attachment limit. Large files are shared only with their intended recipient, not made public.</p>
+        </div>
+        <div class="actions">
+          <button id="connect-drive" class="button button-secondary" type="button">Connect Google Drive</button>
+          <span id="drive-connection-status" class="status" role="status">Checking Google Drive…</span>
+        </div>
+      </section>
+
+      <section class="panel drive-connection">
+        <div>
+          <h2>Gmail API access</h2>
+          <p class="help-text">Connect the Gmail API to send mail using Google OAuth. This uses the sender address configured as <code>GMAIL_USER</code>.</p>
+        </div>
+        <div class="actions">
+          <button id="connect-gmail" class="button button-secondary" type="button">Connect Gmail API</button>
+          <span id="gmail-connection-status" class="status" role="status">Checking Gmail API…</span>
+        </div>
       </section>
 
       <section class="panel">
@@ -51,7 +75,7 @@
           <label class="field">
             Send using Gmail account
             <select id="sender-account" required></select>
-            <small>This account will send each local attachment to the mapped student or assigned evaluator.</small>
+            <small>This account sends small files as attachments and large files as private Google Drive links to the mapped student or assigned evaluator.</small>
           </label>
           <label class="field">
             Send mode

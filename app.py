@@ -19,11 +19,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+
+import drive_storage
 import mail1
 
 
-ROOT = Path(__file__).resolve().parent
-load_dotenv(ROOT / ".env")
 DATA_DIR = Path(os.getenv("MAIL_DASHBOARD_DATA_DIR", ROOT / "data")).expanduser()
 TESTS_DIR = DATA_DIR / "tests"
 MAPPINGS_FILE = DATA_DIR / "mappings.csv"
@@ -117,25 +119,23 @@ def _accounts() -> dict[str, str]:
         except json.JSONDecodeError as error:
             raise HTTPException(
                 status_code=500,
-                detail="GMAIL_ACCOUNTS must be a JSON object mapping email addresses to app passwords.",
+                detail="GMAIL_ACCOUNTS must be a JSON object mapping email addresses to values.",
             ) from error
         if not isinstance(value, dict) or not all(
             isinstance(email_address, str)
             and isinstance(password, str)
             and email_address.strip()
-            and password.strip()
             for email_address, password in value.items()
         ):
             raise HTTPException(
                 status_code=500,
-                detail="GMAIL_ACCOUNTS must map non-empty email addresses to non-empty app passwords.",
+                detail="GMAIL_ACCOUNTS must map non-empty email addresses to strings.",
             )
-        return {address: password for address, password in value.items()}
+        return {address: "" for address in value}
 
     user = os.getenv("GMAIL_USER")
-    password = os.getenv("GMAIL_APP_PASSWORD")
-    if user and password:
-        return {user: password}
+    if user:
+        return {user: ""}
     return {}
 
 
@@ -143,7 +143,7 @@ def _require_single_account(accounts: dict[str, str]) -> str:
     if len(accounts) != 1:
         raise HTTPException(
             status_code=500,
-            detail="Configure exactly one Gmail account using GMAIL_USER/GMAIL_APP_PASSWORD or a one-entry GMAIL_ACCOUNTS object.",
+            detail="Configure exactly one Gmail address using GMAIL_USER or a one-entry GMAIL_ACCOUNTS object.",
         )
     return next(iter(accounts))
 
@@ -716,14 +716,13 @@ def _pick_folder(purpose: Literal["download", "upload"]) -> str:
 
 
 def _search_one_account(
-    account: str, password: str, after_date: date, senders: list[str]
+    account: str, after_date: date, senders: list[str]
 ) -> list[dict[str, str]]:
-    return mail1.search_emails(account, password, after_date, senders)
+    return mail1.search_emails(account, after_date, senders)
 
 
 def _run_search(test_id: str) -> None:
     test_run = _read_test(test_id)
-    credentials = _accounts()
     account = test_run["search_fields"]["account"]
     senders = test_run["search_fields"].get("senders", [])
     after_date = date.fromisoformat(test_run["search_fields"]["after_date"])
@@ -745,7 +744,6 @@ def _run_search(test_id: str) -> None:
             future = pool.submit(
                 _search_one_account,
                 account,
-                credentials[account],
                 after_date,
                 senders,
             )
@@ -794,7 +792,6 @@ def _run_search(test_id: str) -> None:
 
 def _run_download(test_id: str, selections: list[MessageSelection]) -> None:
     test_run = _read_test(test_id)
-    credentials = _accounts()
     folder = Path(test_run["download_fields"]["output_folder"])
     selections_by_key = {(item.account, item.uid) for item in selections}
     messages = [
@@ -821,7 +818,6 @@ def _run_download(test_id: str, selections: list[MessageSelection]) -> None:
                 pool.submit(
                     mail1.download_attachments,
                     message["account"],
-                    credentials[message["account"]],
                     message["uid"],
                     folder,
                 ): message
@@ -878,7 +874,6 @@ def _run_download(test_id: str, selections: list[MessageSelection]) -> None:
 def _run_upload(test_id: str) -> None:
     test_run = _read_test(test_id)
     try:
-        credentials = _accounts()
         upload_fields = test_run["upload_fields"]
         mapping_rows = upload_fields.get("mappings")
         send_mode = upload_fields.get("send_mode", "student")
@@ -904,7 +899,6 @@ def _run_upload(test_id: str) -> None:
         ]
         files_by_roll, _ = _find_upload_files(Path(upload_fields["folder"]))
         sender_account = upload_fields["sender_account"]
-        password = credentials[sender_account]
         subject_template = upload_fields.get(
             "subject_template", UPLOAD_SUBJECT_TEMPLATE
         )
@@ -982,7 +976,6 @@ def _run_upload(test_id: str) -> None:
                 pool.submit(
                     mail1.send_attachment,
                     sender_account,
-                    password,
                     row["mail_account"],
                     row["roll_number"],
                     attachment_path,
@@ -1093,6 +1086,33 @@ def list_accounts() -> dict[str, list[str]]:
     if not accounts:
         return {"accounts": []}
     return {"accounts": [_require_single_account(accounts)]}
+
+
+@app.get("/api/drive/status")
+def get_drive_status() -> dict[str, Any]:
+    return drive_storage.drive_status()
+
+
+@app.get("/api/gmail/status")
+def get_gmail_status() -> dict[str, Any]:
+    return mail1.gmail_status()
+
+
+@app.post("/api/gmail/connect")
+def connect_gmail_api() -> dict[str, Any]:
+    try:
+        return mail1.connect_gmail()
+    except RuntimeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/drive/connect")
+def connect_google_drive() -> dict[str, Any]:
+    try:
+        drive_storage.connect_drive()
+    except RuntimeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return drive_storage.drive_status()
 
 
 @app.get("/api/folders/pick")

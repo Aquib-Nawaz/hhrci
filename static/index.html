@@ -6,6 +6,8 @@
     <title>Mail Desk — Download</title>
     <link rel="stylesheet" href="/static/styles.css">
     <script src="/static/downloader.js" defer></script>
+    <script src="/static/drive.js" defer></script>
+    <script src="/static/gmail-auth.js" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -20,6 +22,28 @@
         <p class="eyebrow">MAIL WORKSPACE</p>
         <h1>Find and download attachments</h1>
         <p>Search one Gmail inbox by one or more senders, review matching messages, then save attachments locally.</p>
+      </section>
+
+      <section class="panel drive-connection">
+        <div>
+          <h2>Google Drive access</h2>
+          <p class="help-text">Connect Drive to download files linked from Gmail messages. Drive files are downloaded only when this Google account can access them.</p>
+        </div>
+        <div class="actions">
+          <button id="connect-drive" class="button button-secondary" type="button">Connect Google Drive</button>
+          <span id="drive-connection-status" class="status" role="status">Checking Google Drive…</span>
+        </div>
+      </section>
+
+      <section class="panel drive-connection">
+        <div>
+          <h2>Gmail API access</h2>
+          <p class="help-text">Connect the Gmail API to search messages, download attachments, and send mail using Google OAuth.</p>
+        </div>
+        <div class="actions">
+          <button id="connect-gmail" class="button button-secondary" type="button">Connect Gmail API</button>
+          <span id="gmail-connection-status" class="status" role="status">Checking Gmail API…</span>
+        </div>
       </section>
 
       <section class="panel">
@@ -89,7 +113,7 @@
               <button id="pick-download-folder" class="button button-secondary" type="button">Choose folder…</button>
               <span id="download-folder" class="folder-path" aria-live="polite">Choose a folder after searching.</span>
             </div>
-            <small>Attachments are saved directly in this folder. Existing filenames are preserved with a UID prefix added if needed.</small>
+            <small>Email attachments and accessible Google Drive links are saved directly in this folder. Existing filenames are preserved with a message-ID prefix added if needed.</small>
           </div>
           <button id="download-selected" class="button button-primary" type="button" disabled>Download selected attachments</button>
           <span id="download-status" class="status" role="status"></span>
