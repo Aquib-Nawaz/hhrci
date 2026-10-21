@@ -141,9 +141,38 @@ connected Drive account, then shared with the email recipient.
   Drive link. Drive copies remain in the connected account's Drive after
   sending.
 
-Set `GMAIL_ATTACHMENT_MAX_BYTES` in `.env` to change the attachment cutoff
-(positive integer bytes; default `16777216`, or 16 MiB). Keep the limit below
-Gmail's maximum message size to allow for MIME encoding and message overhead.
+### Command-line student copy sender
+
+To send mapped student files without opening the dashboard, run:
+
+```sh
+python send_student_copies.py
+```
+
+On Windows, you can also run `py -3 send_student_copies.py`. Install the
+project dependencies first with `python -m pip install -r requirements.txt`.
+This script does not use PyYAML.
+
+The script prompts you to use or authorize a Gmail account, enter a test name,
+and enter one or more folders (one path per prompt; submit a blank line when
+finished). It recursively finds files whose names contain exactly one
+standalone five-digit roll number and matches them to
+`data/mappings.csv` (`roll_number,mail_account`). It shows the pending
+file-to-recipient list and asks for confirmation before sending. Files with no
+mapping or ambiguous roll numbers are skipped and reported.
+
+Progress is stored in `data/student_mail_progress.csv`, keyed by test name and
+file path. The CSV is atomically updated after each successful send, so reruns
+with the same test name skip already-sent files and retry failed or pending
+files. A crash after Gmail accepts a message but before the success row is
+saved can still require checking Sent mail before retrying that file.
+Oversized files use the app's Google Drive attachment fallback; if Drive is not
+connected, the script offers to authorize it. Declined large files remain
+pending for a later run.
+
+  Set `GMAIL_ATTACHMENT_MAX_BYTES` in `.env` to change the attachment cutoff
+  (positive integer bytes; default `16777216`, or 16 MiB). Keep the limit below
+  Gmail's maximum message size to allow for MIME encoding and message overhead.
 
 Searching senders, downloading messages, and sending mapped files run in
 parallel worker threads. The dashboard polls the saved test record for progress
