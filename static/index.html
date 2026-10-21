@@ -51,8 +51,8 @@
           <div class="form-grid">
             <label class="field">
               Test name
-              <input id="test-name" name="test_name" type="text" placeholder="e.g. October exam papers">
-              <small>A label to identify this saved download test.</small>
+              <input id="test-name" name="test_name" type="text" placeholder="e.g. October exam papers" required>
+              <small>Reusing this name resumes the saved test; downloaded messages remain marked complete.</small>
             </label>
             <label class="field">
               Gmail account
@@ -98,11 +98,12 @@
                 <th>Subject</th>
                 <th>Account</th>
                 <th>Date</th>
+                <th>Status</th>
                 <th><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody id="message-list">
-              <tr><td colspan="6" class="empty-state">No messages loaded.</td></tr>
+              <tr><td colspan="7" class="empty-state">No messages loaded.</td></tr>
             </tbody>
           </table>
         </div>

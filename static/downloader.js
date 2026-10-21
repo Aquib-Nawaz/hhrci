@@ -36,15 +36,14 @@ function setMessageRows(messages) {
   if (!messages.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 6;
+    cell.colSpan = 7;
     cell.className = "empty-state";
     cell.textContent = currentTest?.operations.search.status === "running"
       ? "Searching inboxes…"
       : "No messages in this test run.";
     row.append(cell);
     messageList.append(row);
-    downloadButton.disabled =
-      !currentTest || currentTest.operations.search.status === "running";
+    downloadButton.disabled = true;
     return;
   }
 
@@ -57,6 +56,7 @@ function setMessageRows(messages) {
     checkbox.dataset.account = message.account;
     checkbox.dataset.uid = message.uid;
     checkbox.disabled =
+      message.downloaded ||
       currentTest.operations.search.status === "running" ||
       currentTest.operations.download.status === "running";
     checkbox.setAttribute("aria-label", `Select ${message.subject || "message"}`);
@@ -67,6 +67,11 @@ function setMessageRows(messages) {
       cell.textContent = value || "—";
       row.append(cell);
     }
+    const statusCell = document.createElement("td");
+    statusCell.textContent = message.downloaded
+      ? `Downloaded${message.downloaded_files?.length ? ` (${message.downloaded_files.length} file(s))` : ""}`
+      : "Pending";
+    row.append(statusCell);
     const actionCell = document.createElement("td");
     const removeButton = document.createElement("button");
     removeButton.type = "button";
@@ -83,12 +88,18 @@ function setMessageRows(messages) {
   }
   downloadButton.disabled =
     currentTest.operations.search.status === "running" ||
-    currentTest.operations.download.status === "running";
+    currentTest.operations.download.status === "running" ||
+    !messages.some((message) => !message.downloaded);
 }
 
 function displayTest(testRun) {
   currentTest = testRun;
   document.querySelector("#test-name").value = testRun.test_name || "";
+  const searchFields = testRun.search_fields || {};
+  accountSelect.value = searchFields.account || "";
+  document.querySelector("#senders").value =
+    (searchFields.senders || []).join(", ");
+  document.querySelector("#after-date").value = searchFields.after_date || "";
   downloadFolderPath = testRun.download_fields?.output_folder || "";
   document.querySelector("#download-folder").textContent =
     downloadFolderPath || "Choose a folder after searching.";
@@ -98,6 +109,7 @@ function displayTest(testRun) {
     `Test ${testRun.test_name || testRun.id}`,
     `${counts.found} found`,
     `${counts.downloaded} messages downloaded (${counts.downloaded_files} files)`,
+    `${counts.found - counts.downloaded} pending`,
     `${counts.updated} updated`,
     operationText(testRun.operations.search, "Search"),
     operationText(testRun.operations.download, "Download"),

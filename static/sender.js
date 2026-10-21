@@ -21,11 +21,13 @@ const evaluatorList = document.querySelector("#evaluator-list");
 const evaluatorStatus = document.querySelector("#evaluator-status");
 const assignmentPreviewButton = document.querySelector("#preview-evaluator-assignments");
 const assignmentPreviewStatus = document.querySelector("#assignment-preview-status");
-const assignmentPreviewPanel = document.querySelector("#assignment-preview");
-const assignmentList = document.querySelector("#assignment-list");
 let uploadFolderPath = "";
 let uploadInProgress = false;
 let evaluatorAssignments = [];
+let stagedFileStatus = [];
+let excludedFiles = new Set();
+let uploadPreviewReady = false;
+let savedUploadRuns = [];
 let evaluatorSaveTimer = null;
 let evaluatorSaveRevision = 0;
 let evaluatorSaveQueue = Promise.resolve();
@@ -46,9 +48,13 @@ function delay(milliseconds) {
 
 function clearAssignmentPreview() {
   evaluatorAssignments = [];
-  assignmentList.replaceChildren();
-  assignmentPreviewPanel.hidden = true;
-  assignmentPreviewStatus.textContent = "";
+  stagedFileStatus = [];
+  excludedFiles = new Set();
+  uploadPreviewReady = false;
+  fileStatusList?.replaceChildren();
+  if (fileStatusEmpty) fileStatusEmpty.hidden = false;
+  if (fileStatusSummary) fileStatusSummary.textContent = "Files in this upload test";
+  if (assignmentPreviewStatus) assignmentPreviewStatus.textContent = "";
   updateSendButton();
 }
 
@@ -112,6 +118,7 @@ function addMappingRow(mapping = {}) {
     input.placeholder = placeholder;
     input.setAttribute("aria-label", field.replaceAll("_", " "));
     input.addEventListener("input", updateSendButton);
+    input.addEventListener("input", clearAssignmentPreview);
     cell.append(input);
     row.append(cell);
   }
@@ -122,6 +129,7 @@ function addMappingRow(mapping = {}) {
   removeButton.textContent = "Remove";
   removeButton.addEventListener("click", () => {
     row.remove();
+    clearAssignmentPreview();
     updateSendButton();
   });
   actionCell.append(removeButton);
@@ -208,14 +216,25 @@ async function loadEvaluators() {
 
 async function loadTests(selectedId = testRunSelect.value) {
   const { tests } = await api("/api/upload-runs");
+  savedUploadRuns = tests;
   testRunSelect.replaceChildren(new Option("Choose an upload run", ""));
   for (const test of tests) {
-    const label = `${test.test_name || new Date(test.created_at).toLocaleString()} · ${test.upload_mode} · ${test.counts.updated} sent · ${test.operations.upload.status.replaceAll("_", " ")}`;
+    const label = `${test.test_name || new Date(test.created_at).toLocaleString()} · ${test.upload_mode} · ${test.counts.updated} sent · ${test.pending_file_count} pending · ${test.operations.upload.status.replaceAll("_", " ")}`;
     testRunSelect.add(new Option(label, test.id));
   }
   if (tests.some((test) => test.id === selectedId)) testRunSelect.value = selectedId;
   updateSendButton();
   return tests;
+}
+
+function selectedResumeTestId() {
+  const selectedId = testRunSelect.value;
+  if (!selectedId) return "";
+  const inputName = document.querySelector("#test-name").value.trim().toLocaleLowerCase();
+  const selectedRun = savedUploadRuns.find((run) => run.id === selectedId);
+  return selectedRun?.test_name?.trim().toLocaleLowerCase() === inputName
+    ? selectedId
+    : "";
 }
 
 async function loadAccounts() {
@@ -233,8 +252,18 @@ function updateSendButton() {
       /^\d{5}$/.test(mapping.roll_number) &&
       /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mapping.mail_account),
     );
+  const pendingFiles = stagedFileStatus.filter((file) =>
+    !["sent", "removed", "ignored_no_roll_number", "ambiguous"].includes(file.status) &&
+    /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(file.recipient || ""),
+  );
   sendButton.disabled =
-    uploadInProgress || !uploadFolderPath || !senderAccount.value || !readyForMode;
+    uploadInProgress ||
+    !uploadFolderPath ||
+    !senderAccount.value ||
+    !document.querySelector("#test-name").value.trim() ||
+    !readyForMode ||
+    !uploadPreviewReady ||
+    !pendingFiles.length;
 }
 
 function updateSendModePanels() {
@@ -269,7 +298,9 @@ async function showSavedTest(testId) {
   uploadSubject.value = upload.subject_template || "Attachment for roll number {roll_number}";
   if (upload.sender_account) senderAccount.value = upload.sender_account;
   evaluatorAssignments = upload.assignments || [];
-  renderAssignmentPreview(evaluatorAssignments);
+  stagedFileStatus = upload.file_status || [];
+  excludedFiles = new Set(upload.excluded_files || []);
+  uploadPreviewReady = stagedFileStatus.length > 0;
   updateSendButton();
   displayProgress(testRun);
 
@@ -280,45 +311,52 @@ async function showSavedTest(testId) {
   }
 }
 
-function renderAssignmentPreview(assignments) {
-  assignmentList.replaceChildren();
-  for (const assignment of assignments) {
-    const row = document.createElement("tr");
-    for (const value of [
-      assignment.roll_number,
-      assignment.file.split(/[\\/]/).pop(),
-      assignment.evaluator_name,
-      assignment.evaluator_email,
-    ]) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    }
-    assignmentList.append(row);
-  }
-  assignmentPreviewPanel.hidden = assignments.length === 0;
-  updateSendButton();
-}
-
 function displayProgress(testRun) {
   const counts = testRun.counts;
   const upload = testRun.operations.upload;
+  stagedFileStatus = testRun.upload_fields?.file_status || [];
+  excludedFiles = new Set(
+    testRun.upload_fields?.excluded_files ||
+      stagedFileStatus
+        .filter((file) => file.status === "removed")
+        .map((file) => file.file),
+  );
   const progress = upload.progress;
   const state = upload.status === "running"
     ? `Uploading ${progress.completed}/${progress.total}`
     : `Upload ${upload.status.replaceAll("_", " ")}`;
   testRunSummary.textContent =
     `Test ${testRun.test_name || testRun.id} · ${testRun.upload_fields?.send_mode || "student"} mode · ${counts.updated} files sent · ${state}`;
-  renderFileStatus(testRun.upload_fields?.file_status || []);
+  renderFileStatus(
+    testRun.upload_fields?.file_status || [],
+    uploadPreviewReady && upload.status !== "running",
+  );
 }
 
-function renderFileStatus(files) {
+function renderFileStatus(files, allowRemoval = false) {
+  if (!fileStatusList || !fileStatusEmpty || !fileStatusSummary) {
+    if (assignmentPreviewStatus) {
+      assignmentPreviewStatus.textContent =
+        "The file preview area is missing. Reload the upload page to update it.";
+    }
+    return;
+  }
   fileStatusList.replaceChildren();
   const sentCount = files.filter((file) => file.status === "sent").length;
+  const pendingCount = files.filter((file) =>
+    !["sent", "removed", "ignored_no_roll_number", "ambiguous"].includes(file.status),
+  ).length;
+  const removedCount = files.filter((file) => file.status === "removed").length;
   fileStatusSummary.textContent =
-    `Files in this upload test (${sentCount}/${files.length} sent)`;
+    `Files in this upload test (${sentCount} sent · ${pendingCount} pending · ${removedCount} removed)`;
   fileStatusEmpty.hidden = files.length > 0;
-  for (const file of files) {
+  const visibleFiles = allowRemoval
+    ? files.filter((file) => file.status !== "removed")
+    : files;
+  fileStatusEmpty.textContent = uploadPreviewReady
+    ? "No files remain in the upload list."
+    : "Choose a folder and generate the preview to see files and recipients.";
+  for (const file of visibleFiles) {
     const row = document.createElement("tr");
     for (const value of [
       file.roll_number || "—",
@@ -332,8 +370,35 @@ function renderFileStatus(files) {
       cell.textContent = value;
       row.append(cell);
     }
+    const actionCell = document.createElement("td");
+    if (
+      allowRemoval &&
+      !["sent", "ignored_no_roll_number", "ambiguous"].includes(file.status)
+    ) {
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "button button-danger";
+      removeButton.textContent = "Remove";
+      removeButton.setAttribute("aria-label", `Remove ${file.file} from this upload`);
+      removeButton.addEventListener("click", () => removeFileFromPreview(file.file));
+      actionCell.append(removeButton);
+    }
+    row.append(actionCell);
     fileStatusList.append(row);
   }
+  fileStatusEmpty.hidden = visibleFiles.length > 0;
+  updateSendButton();
+}
+
+function removeFileFromPreview(filepath) {
+  excludedFiles.add(filepath);
+  stagedFileStatus = stagedFileStatus.map((file) =>
+    file.file === filepath ? { ...file, status: "removed" } : file,
+  );
+  evaluatorAssignments = evaluatorAssignments.filter(
+    (assignment) => assignment.file !== filepath,
+  );
+  renderFileStatus(stagedFileStatus, true);
 }
 
 async function pollUpload(testId) {
@@ -372,7 +437,10 @@ document.querySelector("#add-evaluator").addEventListener("click", () => {
   clearAssignmentPreview();
   addEvaluatorRow();
 });
-senderAccount.addEventListener("change", updateSendButton);
+senderAccount.addEventListener("change", () => {
+  clearAssignmentPreview();
+  updateSendButton();
+});
 sendMode.addEventListener("change", updateSendModePanels);
 
 document.querySelector("#pick-upload-folder").addEventListener("click", async () => {
@@ -402,6 +470,7 @@ document.querySelector("#discover-mappings").addEventListener("click", async () 
       method: "POST",
       body: JSON.stringify({ folder: uploadFolderPath }),
     });
+    clearAssignmentPreview();
     mappingList.replaceChildren();
     result.rows.forEach(addMappingRow);
     if (!result.rows.length) addMappingRow();
@@ -450,28 +519,59 @@ document.querySelector("#save-evaluators").addEventListener("click", async () =>
 
 assignmentPreviewButton.addEventListener("click", async () => {
   assignmentPreviewButton.disabled = true;
-  assignmentPreviewStatus.textContent = "Saving evaluators and randomizing assignments…";
+  assignmentPreviewStatus.textContent = "Preparing file and recipient preview…";
   try {
+    if (!document.querySelector("#test-name").value.trim()) {
+      throw new Error("Enter a test name before previewing files.");
+    }
     if (!uploadFolderPath) throw new Error("Choose the folder containing student copies first.");
-    await saveEvaluatorsNow();
-    clearAssignmentPreview();
+    if (!senderAccount.value) throw new Error("Choose a Gmail sender account first.");
+    if (sendMode.value === "evaluator") {
+      await saveEvaluatorsNow();
+    } else {
+      const { rows } = await api("/api/mappings", {
+        method: "PUT",
+        body: JSON.stringify({ rows: collectMappings() }),
+      });
+      mappingList.replaceChildren();
+      rows.forEach(addMappingRow);
+      if (!rows.length) addMappingRow();
+    }
     const preview = await api("/api/upload-preview", {
       method: "POST",
       body: JSON.stringify({
         test_name: document.querySelector("#test-name").value.trim(),
+        resume_test_id: selectedResumeTestId(),
         folder: uploadFolderPath,
         sender_account: senderAccount.value,
         subject_template: uploadSubject.value.trim(),
-        send_mode: "evaluator",
+        send_mode: sendMode.value,
+        excluded_files: [...excludedFiles],
       }),
     });
     evaluatorAssignments = preview.assignments;
-    renderAssignmentPreview(evaluatorAssignments);
-    assignmentPreviewStatus.textContent =
-      `${evaluatorAssignments.length} copy assignment(s) ready. Review them, then start upload.`;
+    stagedFileStatus = preview.file_status;
+    excludedFiles = new Set(
+      stagedFileStatus
+        .filter((file) => file.status === "removed")
+        .map((file) => file.file),
+    );
+    uploadPreviewReady = true;
+    const fileStatusPanel = document.querySelector("#file-status-panel");
+    if (fileStatusPanel) fileStatusPanel.open = true;
+    renderFileStatus(stagedFileStatus, true);
+    if (assignmentPreviewStatus) {
+      assignmentPreviewStatus.textContent =
+        `${stagedFileStatus.length - excludedFiles.size} file(s) ready to review. Remove any files you do not want sent.`;
+    }
   } catch (error) {
-    clearAssignmentPreview();
-    assignmentPreviewStatus.textContent = error.message;
+    uploadPreviewReady = false;
+    updateSendButton();
+    if (assignmentPreviewStatus) {
+      assignmentPreviewStatus.textContent = `Could not prepare preview: ${error.message}`;
+    } else {
+      sendStatus.textContent = `Could not prepare preview: ${error.message}`;
+    }
   } finally {
     assignmentPreviewButton.disabled = false;
   }
@@ -510,11 +610,13 @@ sendButton.addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({
         test_name: document.querySelector("#test-name").value.trim(),
+        resume_test_id: selectedResumeTestId(),
         folder: uploadFolderPath,
         sender_account: senderAccount.value,
         subject_template: uploadSubject.value.trim(),
         send_mode: sendMode.value,
         assignments: evaluatorAssignments,
+        excluded_files: [...excludedFiles],
       }),
     });
     await loadTests(testRun.id);
@@ -547,10 +649,11 @@ async function initialize() {
 
     testRunSelect.value = selectedId;
     await showSavedTest(selectedId);
-    updateSendModePanels();
   } catch (error) {
     mappingStatus.textContent = error.message;
   }
 }
 
 initialize();
+
+document.querySelector("#test-name")?.addEventListener("input", clearAssignmentPreview);

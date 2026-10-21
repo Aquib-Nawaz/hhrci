@@ -49,6 +49,7 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 _jobs = ThreadPoolExecutor(max_workers=WORKER_COUNT, thread_name_prefix="mail-job")
 _locks_guard = threading.Lock()
 _test_locks: dict[str, threading.RLock] = {}
+_named_tests_lock = threading.RLock()
 _mappings_lock = threading.Lock()
 
 
@@ -100,11 +101,13 @@ class MappingDiscoveryRequest(BaseModel):
 
 class UploadRequest(BaseModel):
     test_name: str = ""
+    resume_test_id: str | None = None
     folder: str = Field(min_length=1)
     sender_account: str = Field(min_length=1)
     subject_template: str = Field(default=UPLOAD_SUBJECT_TEMPLATE, min_length=1)
     send_mode: Literal["student", "evaluator"] = "student"
     assignments: list[EvaluatorAssignment] = Field(default_factory=list)
+    excluded_files: list[str] = Field(default_factory=list)
 
 
 def _now() -> str:
@@ -190,6 +193,7 @@ def _read_test(test_id: str) -> dict[str, Any]:
         test_run["upload_fields"].setdefault("assignments", [])
         test_run["upload_fields"].setdefault("files_by_roll", {})
         test_run["upload_fields"].setdefault("file_status", [])
+        test_run["upload_fields"].setdefault("excluded_files", [])
         test_run["upload_fields"].setdefault("ignored_files", [])
         test_run["upload_fields"].setdefault("mappings", [])
         test_run["upload_fields"].setdefault(
@@ -318,6 +322,52 @@ def _refresh_counts(test_run: dict[str, Any]) -> None:
         ),
         "updated": len(test_run.get("updates", [])),
     }
+
+
+def _test_kind(test_run: dict[str, Any]) -> str:
+    kind = test_run.get("kind")
+    if kind is not None:
+        return kind
+    return (
+        "upload"
+        if test_run["operations"]["upload"]["status"] != "idle"
+        or test_run.get("updates")
+        else "download"
+    )
+
+
+def _find_upload_run(request: UploadRequest) -> dict[str, Any] | None:
+    if request.resume_test_id:
+        test_run = _read_test(request.resume_test_id)
+        if _test_kind(test_run) != "upload":
+            raise HTTPException(
+                status_code=409, detail="The selected run is not an upload run."
+            )
+        if test_run.get("test_name", "").strip().casefold() != request.test_name.strip().casefold():
+            raise HTTPException(
+                status_code=409,
+                detail="The selected upload run does not match the entered test name.",
+            )
+        return test_run
+    test_name = request.test_name.strip()
+    return _find_named_test(test_name, "upload") if test_name else None
+
+
+def _find_named_test(test_name: str, kind: Literal["download", "upload"]) -> dict[str, Any] | None:
+    if not TESTS_DIR.exists():
+        return None
+    matching_tests = []
+    normalized_name = test_name.strip().casefold()
+    for path in TESTS_DIR.glob("*.json"):
+        test_run = _read_test(path.stem)
+        if (
+            _test_kind(test_run) == kind
+            and test_run.get("test_name", "").strip().casefold() == normalized_name
+        ):
+            matching_tests.append((path.stat().st_mtime, test_run))
+    if not matching_tests:
+        return None
+    return max(matching_tests, key=lambda item: item[0])[1]
 
 
 def _set_operation(
@@ -580,6 +630,7 @@ def _validated_evaluator_assignments(
     files_by_roll: dict[str, list[Path]],
     evaluators: list[dict[str, str]],
     assignments: list[EvaluatorAssignment],
+    excluded_files: set[str] | None = None,
 ) -> list[dict[str, str]]:
     expected_files = {
         (roll_number, str(paths[0]))
@@ -589,6 +640,17 @@ def _validated_evaluator_assignments(
     evaluator_by_identity = {
         (evaluator["name"], evaluator["email"]): evaluator
         for evaluator in evaluators
+    }
+    excluded = excluded_files or set()
+    if not excluded.issubset({filepath for _, filepath in expected_files}):
+        raise HTTPException(
+            status_code=400,
+            detail="Removed files must be uniquely identified files in the selected folder.",
+        )
+    expected_files = {
+        (roll_number, filepath)
+        for roll_number, filepath in expected_files
+        if filepath not in excluded
     }
     received_files: set[tuple[str, str]] = set()
     validated: list[dict[str, str]] = []
@@ -751,6 +813,16 @@ def _run_search(test_id: str) -> None:
             )
 
         def save_results(current: dict[str, Any]) -> None:
+            previous_messages = {
+                (message["account"], message["uid"]): message
+                for message in current["messages"]
+            }
+            for message in messages:
+                previous = previous_messages.get((message["account"], message["uid"]))
+                if previous:
+                    message["downloaded"] = previous.get("downloaded", False)
+                    message["downloaded_files"] = previous.get("downloaded_files", [])
+                    message["updated"] = previous.get("updated", False)
             current["messages"] = messages
             current["operations"]["search"]["errors"] = errors
             current["operations"]["search"]["status"] = (
@@ -901,7 +973,11 @@ def _run_upload(test_id: str) -> None:
     }
     total = 0
     for row in mappings:
-        matches = files_by_roll.get(row["roll_number"], [])
+        matches = [
+            path
+            for path in files_by_roll.get(row["roll_number"], [])
+            if file_status.get(str(path), {}).get("status") not in ("sent", "removed")
+        ]
         if not matches:
             continue
         if not row["mail_account"]:
@@ -930,8 +1006,6 @@ def _run_upload(test_id: str) -> None:
             continue
         path = matches[0]
         status_row = file_status.get(str(path))
-        if status_row and status_row["status"] == "sent":
-            continue
         if status_row:
             status_row.update(status="sending", recipient=row["mail_account"])
         ready.append((row, path))
@@ -1052,12 +1126,18 @@ def _run_upload(test_id: str) -> None:
 
 @app.get("/")
 def downloader_page() -> FileResponse:
-    return FileResponse(ROOT / "static" / "index.html")
+    return FileResponse(
+        ROOT / "static" / "index.html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/send")
 def sender_page() -> FileResponse:
-    return FileResponse(ROOT / "static" / "send.html")
+    return FileResponse(
+        ROOT / "static" / "send.html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/accounts")
@@ -1111,15 +1191,7 @@ def _list_test_records(kind: Literal["download", "upload"]) -> dict[str, list[di
         reverse=True,
     ):
         test_run = _read_test(path.stem)
-        test_kind = test_run.get("kind")
-        if test_kind is None:
-            test_kind = (
-                "upload"
-                if test_run["operations"]["upload"]["status"] != "idle"
-                or test_run.get("updates")
-                else "download"
-            )
-        if test_kind != kind:
+        if _test_kind(test_run) != kind:
             continue
         tests.append(
             {
@@ -1130,6 +1202,13 @@ def _list_test_records(kind: Literal["download", "upload"]) -> dict[str, list[di
                 ),
                 "created_at": test_run["created_at"],
                 "message_count": len(test_run["messages"]),
+                "pending_file_count": sum(
+                    1
+                    for item in test_run.get("upload_fields", {}).get("file_status", [])
+                    if item.get("status") != "sent"
+                    and item.get("status")
+                    not in ("removed", "ignored_no_roll_number", "ambiguous")
+                ),
                 "counts": test_run["counts"],
                 "operations": test_run["operations"],
             }
@@ -1149,6 +1228,9 @@ def list_upload_runs() -> dict[str, list[dict[str, Any]]]:
 
 @app.post("/api/tests", status_code=202)
 def create_test(request: SearchRequest) -> dict[str, Any]:
+    test_name = request.test_name.strip()
+    if not test_name:
+        raise HTTPException(status_code=400, detail="Enter a test name to save and resume this run.")
     accounts = _accounts()
     _require_single_account(accounts)
     if request.account not in accounts:
@@ -1167,56 +1249,86 @@ def create_test(request: SearchRequest) -> dict[str, Any]:
     if len(set(request.senders)) != len(request.senders):
         raise HTTPException(status_code=400, detail="Sender filters must not contain duplicates.")
 
-    test_id = str(uuid.uuid4())
-    test_run: dict[str, Any] = {
-        "id": test_id,
-        "kind": "download",
-        "test_name": request.test_name.strip(),
-        "created_at": _now(),
-        "search_fields": {
-            "account": request.account,
-            "senders": request.senders,
-            "download_folder": "",
-            "after_date": request.after_date.isoformat(),
-        },
-        "download_fields": {
-            "output_folder": "",
-            "selected_messages": [],
-        },
-        "upload_fields": {
-            "send_mode": "student",
-            "folder": "",
-            "sender_account": "",
-            "evaluators": [],
-            "assignments": [],
-            "files_by_roll": {},
-            "file_status": [],
-            "ignored_files": [],
-            "mappings": [],
-            "subject_template": UPLOAD_SUBJECT_TEMPLATE,
-            "body": UPLOAD_BODY,
-        },
-        "messages": [],
-        "updates": [],
-        "counts": {
-            "found": 0,
-            "downloaded": 0,
-            "downloaded_files": 0,
-            "updated": 0,
-        },
-        "operations": {
-            "search": {
-                **_operation("running"),
-                "started_at": _now(),
-                "progress": {"completed": 0, "total": 1},
-            },
-            "download": _operation(),
-            "upload": _operation(),
-        },
-    }
-    _write_test(test_run)
-    _submit_job(test_id, "search", _run_search)
-    return _read_test(test_id)
+    with _named_tests_lock:
+        test_run = _find_named_test(test_name, "download")
+        if test_run:
+            test_id = test_run["id"]
+            with _lock_for(test_id):
+                test_run = _read_test(test_id)
+                if any(
+                    operation["status"] == "running"
+                    for operation in test_run["operations"].values()
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This named test already has an operation running.",
+                    )
+
+                def restart_search(current: dict[str, Any]) -> None:
+                    current["search_fields"].update(
+                        account=request.account,
+                        senders=request.senders,
+                        after_date=request.after_date.isoformat(),
+                    )
+                    current["test_name"] = test_name
+                    current["operations"]["search"] = {
+                        **_operation("running"),
+                        "started_at": _now(),
+                        "progress": {"completed": 0, "total": 1},
+                    }
+
+                _update_test(test_id, restart_search)
+        else:
+            test_id = str(uuid.uuid4())
+            test_run = {
+                "id": test_id,
+                "kind": "download",
+                "test_name": test_name,
+                "created_at": _now(),
+                "search_fields": {
+                    "account": request.account,
+                    "senders": request.senders,
+                    "download_folder": "",
+                    "after_date": request.after_date.isoformat(),
+                },
+                "download_fields": {
+                    "output_folder": "",
+                    "selected_messages": [],
+                },
+                "upload_fields": {
+                    "send_mode": "student",
+                    "folder": "",
+                    "sender_account": "",
+                    "evaluators": [],
+                    "assignments": [],
+                    "files_by_roll": {},
+                    "file_status": [],
+                    "ignored_files": [],
+                    "mappings": [],
+                    "subject_template": UPLOAD_SUBJECT_TEMPLATE,
+                    "body": UPLOAD_BODY,
+                },
+                "messages": [],
+                "updates": [],
+                "counts": {
+                    "found": 0,
+                    "downloaded": 0,
+                    "downloaded_files": 0,
+                    "updated": 0,
+                },
+                "operations": {
+                    "search": {
+                        **_operation("running"),
+                        "started_at": _now(),
+                        "progress": {"completed": 0, "total": 1},
+                    },
+                    "download": _operation(),
+                    "upload": _operation(),
+                },
+            }
+            _write_test(test_run)
+        _submit_job(test_id, "search", _run_search)
+        return _read_test(test_id)
 
 
 @app.get("/api/tests/{test_id}")
@@ -1269,6 +1381,24 @@ def download_messages(test_id: str, request: DownloadRequest) -> dict[str, Any]:
         if invalid:
             raise HTTPException(
                 status_code=400, detail=f"Messages are not in this test run: {invalid}"
+            )
+        selected_keys = [(item.account, item.uid) for item in request.messages]
+        if len(selected_keys) != len(set(selected_keys)):
+            raise HTTPException(status_code=400, detail="A message may only be selected once.")
+        downloaded_keys = {
+            (message["account"], message["uid"])
+            for message in test_run["messages"]
+            if message.get("downloaded")
+        }
+        already_downloaded = [
+            {"account": item.account, "uid": item.uid}
+            for item in request.messages
+            if (item.account, item.uid) in downloaded_keys
+        ]
+        if already_downloaded:
+            raise HTTPException(
+                status_code=409,
+                detail=f"These messages are already downloaded: {already_downloaded}",
             )
 
         folder = Path(request.output_folder).expanduser().resolve()
@@ -1344,21 +1474,90 @@ def update_evaluators(request: EvaluatorUpdate) -> dict[str, Any]:
 
 @app.post("/api/upload-preview")
 def preview_upload(request: UploadRequest) -> dict[str, Any]:
-    if request.send_mode != "evaluator":
-        raise HTTPException(
-            status_code=400,
-            detail="Assignment preview is only available in evaluator mode.",
-        )
     folder, files_by_roll, ignored_files, mappings, evaluators = _prepare_upload(
         request
     )
-    assignments = _assign_evaluator_files(files_by_roll, evaluators)
+    previous_run = _find_upload_run(request)
+    previous_upload = previous_run.get("upload_fields", {}) if previous_run else {}
+    same_folder = previous_upload.get("folder") == str(folder)
+    excluded_files = {
+        str(Path(filepath).expanduser().resolve())
+        for filepath in request.excluded_files
+    }
+    if same_folder:
+        excluded_files.update(
+            str(Path(filepath).expanduser().resolve())
+            for filepath in previous_upload.get("excluded_files", [])
+        )
+    available_files = {
+        str(path)
+        for paths in files_by_roll.values()
+        for path in paths
+    }
+    invalid_excluded = excluded_files - available_files
+    if invalid_excluded:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Removed files are not in the selected folder: {sorted(invalid_excluded)}",
+        )
+    remaining_files_by_roll = {
+        roll_number: paths
+        for roll_number, paths in files_by_roll.items()
+        if len(paths) == 1 and str(paths[0]) not in excluded_files
+    }
+    assignments: list[dict[str, str]] = []
+    if request.send_mode == "evaluator":
+        prior_assignments = {
+            item["file"]: item
+            for item in previous_upload.get("assignments", [])
+        } if same_folder else {}
+        assignments.extend(
+            {
+                **prior_assignments[str(paths[0])],
+                "status": "assigned",
+            }
+            for paths in remaining_files_by_roll.values()
+            if str(paths[0]) in prior_assignments
+        )
+        assigned_files = {item["file"] for item in assignments}
+        missing_assignments = {
+            roll_number: paths
+            for roll_number, paths in remaining_files_by_roll.items()
+            if str(paths[0]) not in assigned_files
+        }
+        assignments.extend(_assign_evaluator_files(missing_assignments, evaluators))
+    file_status = _file_status_rows(
+        folder,
+        files_by_roll,
+        mappings,
+        assignments if request.send_mode == "evaluator" else None,
+    )
+    for item in file_status:
+        previous_status = {
+            status["file"]: status
+            for status in previous_upload.get("file_status", [])
+        }.get(item["file"]) if same_folder else None
+        if previous_status and previous_status.get("status") == "sent":
+            item.update(
+                status="sent",
+                recipient=previous_status.get("recipient", item["recipient"]),
+                evaluator_name=previous_status.get("evaluator_name", item["evaluator_name"]),
+            )
+        elif item["file"] in excluded_files:
+            item["status"] = "removed"
+        elif previous_status and previous_status.get("status") == "removed":
+            item["status"] = "removed"
+            excluded_files.add(item["file"])
+        elif previous_status and previous_status.get("status") in ("failed", "sending"):
+            item["status"] = "pending"
+            item["recipient"] = previous_status.get("recipient", item["recipient"])
+            item["evaluator_name"] = previous_status.get(
+                "evaluator_name", item["evaluator_name"]
+            )
     return {
         "folder": str(folder),
         "assignments": assignments,
-        "file_status": _file_status_rows(
-            folder, files_by_roll, mappings, assignments
-        ),
+        "file_status": file_status,
         "ignored_files": ignored_files,
     }
 
@@ -1459,36 +1658,118 @@ def send_mappings(test_id: str, request: UploadRequest) -> dict[str, Any]:
             evaluator_snapshot,
         ) = _prepare_upload(request)
         previous_upload = test_run.get("upload_fields", {})
-        if test_run.get("updates") and (
-            previous_upload.get("folder") != str(folder)
-            or previous_upload.get("sender_account") != request.sender_account
-        ):
+        same_folder = previous_upload.get("folder") == str(folder)
+
+        excluded_files = {
+            str(Path(filepath).expanduser().resolve())
+            for filepath in (
+                request.excluded_files
+                + (
+                    previous_upload.get("excluded_files", [])
+                    if same_folder
+                    else []
+                )
+            )
+        }
+        available_files = {
+            str(path)
+            for paths in files_by_roll.values()
+            for path in paths
+        }
+        invalid_excluded = excluded_files - available_files
+        if invalid_excluded:
             raise HTTPException(
-                status_code=409,
-                detail="This test ID already has successful uploads. Start a new test for a different upload folder or sender.",
+                status_code=400,
+                detail=f"Removed files are not in the selected folder: {sorted(invalid_excluded)}",
             )
 
-        assignments = previous_upload.get("assignments", [])
-        if request.send_mode == "evaluator" and not assignments:
-            assignments = _assign_evaluator_files(files_by_roll, evaluator_snapshot)
+        assignments = []
+        if request.send_mode == "evaluator":
+            if request.assignments:
+                assignments = _validated_evaluator_assignments(
+                    files_by_roll,
+                    evaluator_snapshot,
+                    request.assignments,
+                    excluded_files,
+                )
+            else:
+                prior_assignments = {
+                    item["file"]: item
+                    for item in previous_upload.get("assignments", [])
+                } if same_folder else {}
+                remaining_files_by_roll = {
+                    roll_number: paths
+                    for roll_number, paths in files_by_roll.items()
+                    if len(paths) == 1 and str(paths[0]) not in excluded_files
+                }
+                assignments.extend(
+                    {
+                        **prior_assignments[str(paths[0])],
+                        "status": "assigned",
+                    }
+                    for paths in remaining_files_by_roll.values()
+                    if str(paths[0]) in prior_assignments
+                )
+                assigned_files = {item["file"] for item in assignments}
+                missing_assignments = {
+                    roll_number: paths
+                    for roll_number, paths in remaining_files_by_roll.items()
+                    if str(paths[0]) not in assigned_files
+                }
+                assignments.extend(
+                    _assign_evaluator_files(missing_assignments, evaluator_snapshot)
+                )
+                assignments = _validated_evaluator_assignments(
+                    files_by_roll,
+                    evaluator_snapshot,
+                    [
+                        EvaluatorAssignment(**assignment)
+                        for assignment in assignments
+                    ],
+                    excluded_files,
+                )
         file_status = _file_status_rows(
             folder,
             files_by_roll,
             mapping_snapshot,
             assignments if request.send_mode == "evaluator" else None,
         )
-        if previous_upload.get("folder") == str(folder):
-            previous_file_status = {
-                item["file"]: item
-                for item in previous_upload.get("file_status", [])
-            }
-            for item in file_status:
-                previous = previous_file_status.get(item["file"])
-                if previous and previous.get("status") == "sent":
-                    item.update(
-                        status="sent",
-                        recipient=previous.get("recipient", item["recipient"]),
-                    )
+        previous_file_status = {
+            item["file"]: item
+            for item in previous_upload.get("file_status", [])
+        }
+        sent_updates = {
+            update["file"]: update
+            for update in test_run.get("updates", [])
+            if update.get("file")
+        }
+        for item in file_status:
+            previous = previous_file_status.get(item["file"])
+            sent_update = sent_updates.get(item["file"])
+            if sent_update or (previous and previous.get("status") == "sent"):
+                item.update(
+                    status="sent",
+                    recipient=(
+                        sent_update.get("recipient", item["recipient"])
+                        if sent_update
+                        else previous.get("recipient", item["recipient"])
+                    ),
+                )
+                if previous and previous.get("evaluator_name"):
+                    item["evaluator_name"] = previous["evaluator_name"]
+            elif item["file"] in excluded_files:
+                item.update(status="removed")
+            elif same_folder and previous and previous.get("status") == "removed":
+                item.update(status="removed")
+                excluded_files.add(item["file"])
+            elif previous and previous.get("status") in ("failed", "sending"):
+                item.update(
+                    status="pending",
+                    recipient=previous.get("recipient", item["recipient"]),
+                    evaluator_name=previous.get(
+                        "evaluator_name", item["evaluator_name"]
+                    ),
+                )
 
         _update_test(
             test_id,
@@ -1502,6 +1783,7 @@ def send_mappings(test_id: str, request: UploadRequest) -> dict[str, Any]:
                     "evaluators": evaluator_snapshot,
                     "assignments": assignments,
                     "file_status": file_status,
+                    "excluded_files": sorted(excluded_files),
                     "files_by_roll": {
                         roll_number: [str(path) for path in paths]
                         for roll_number, paths in files_by_roll.items()
@@ -1527,8 +1809,7 @@ def send_mappings(test_id: str, request: UploadRequest) -> dict[str, Any]:
         return _read_test(test_id)
 
 
-@app.post("/api/upload-runs", status_code=202)
-def create_upload_run(request: UploadRequest) -> dict[str, Any]:
+def _create_upload_run(request: UploadRequest) -> dict[str, Any]:
     (
         folder,
         files_by_roll,
@@ -1536,19 +1817,47 @@ def create_upload_run(request: UploadRequest) -> dict[str, Any]:
         mapping_snapshot,
         evaluator_snapshot,
     ) = _prepare_upload(request)
+    excluded_files = {
+        str(Path(filepath).expanduser().resolve())
+        for filepath in request.excluded_files
+    }
+    available_files = {
+        str(path)
+        for paths in files_by_roll.values()
+        for path in paths
+    }
+    invalid_excluded = excluded_files - available_files
+    if invalid_excluded:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Removed files are not in the selected folder: {sorted(invalid_excluded)}",
+        )
+    remaining_files_by_roll = {
+        roll_number: paths
+        for roll_number, paths in files_by_roll.items()
+        if len(paths) == 1 and str(paths[0]) not in excluded_files
+    }
     assignments = (
         _validated_evaluator_assignments(
-            files_by_roll, evaluator_snapshot, request.assignments
+            files_by_roll,
+            evaluator_snapshot,
+            request.assignments,
+            excluded_files,
         )
         if request.send_mode == "evaluator" and request.assignments
-        else         _validated_evaluator_assignments(
-            files_by_roll, evaluator_snapshot, request.assignments
-        )
-        if request.send_mode == "evaluator" and request.assignments
-        else _assign_evaluator_files(files_by_roll, evaluator_snapshot)
+        else _assign_evaluator_files(remaining_files_by_roll, evaluator_snapshot)
         if request.send_mode == "evaluator"
         else []
     )
+    file_status = _file_status_rows(
+        folder,
+        files_by_roll,
+        mapping_snapshot,
+        assignments if request.send_mode == "evaluator" else None,
+    )
+    for item in file_status:
+        if item["file"] in excluded_files:
+            item["status"] = "removed"
     test_id = str(uuid.uuid4())
     created_at = _now()
     test_run: dict[str, Any] = {
@@ -1573,12 +1882,8 @@ def create_upload_run(request: UploadRequest) -> dict[str, Any]:
                 roll_number: [str(path) for path in paths]
                 for roll_number, paths in files_by_roll.items()
             },
-            "file_status": _file_status_rows(
-                folder,
-                files_by_roll,
-                mapping_snapshot,
-                assignments if request.send_mode == "evaluator" else None,
-            ),
+            "file_status": file_status,
+            "excluded_files": sorted(excluded_files),
             "ignored_files": ignored_files,
             "mappings": mapping_snapshot,
             "subject_template": UPLOAD_SUBJECT_TEMPLATE,
@@ -1595,6 +1900,18 @@ def create_upload_run(request: UploadRequest) -> dict[str, Any]:
     }
     _write_test(test_run)
     return send_mappings(test_id, request)
+
+
+@app.post("/api/upload-runs", status_code=202)
+def create_upload_run(request: UploadRequest) -> dict[str, Any]:
+    test_name = request.test_name.strip()
+    if not test_name:
+        raise HTTPException(status_code=400, detail="Enter a test name to save and resume this run.")
+    with _named_tests_lock:
+        test_run = _find_upload_run(request)
+        if test_run:
+            return send_mappings(test_run["id"], request)
+        return _create_upload_run(request)
 
 
 app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="dashboard")

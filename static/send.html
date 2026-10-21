@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Mail Desk — Send</title>
     <link rel="stylesheet" href="/static/styles.css">
-    <script src="/static/sender.js" defer></script>
+    <script src="/static/sender.js?v=20261020-resume-unsent" defer></script>
     <script src="/static/drive.js" defer></script>
     <script src="/static/gmail-auth.js" defer></script>
   </head>
@@ -56,8 +56,8 @@
         <div class="form-grid">
           <label class="field">
             Test name
-            <input id="test-name" name="test_name" type="text" placeholder="e.g. October exam papers">
-            <small>A label to identify this upload test.</small>
+            <input id="test-name" name="test_name" type="text" placeholder="e.g. October exam papers" required>
+            <small>Reusing this name resumes the saved upload; files already sent are skipped.</small>
           </label>
           <label class="field">
             Email subject
@@ -128,7 +128,7 @@
           </div>
           <button id="add-evaluator" class="button button-secondary" type="button">Add evaluator</button>
         </div>
-        <p class="help-text">Evaluator names and emails are saved automatically to <code>data/evaluators.csv</code> as you edit them and restored when you return. Enter both fields for each evaluator; incomplete rows are not saved. Generate and review the random copy-to-evaluator assignment before starting. Eligible files are distributed as evenly as possible, and each student file is assigned to at most one evaluator.</p>
+        <p class="help-text">Evaluator names and emails are saved automatically to <code>data/evaluators.csv</code> as you edit them and restored when you return. Enter both fields for each evaluator; incomplete rows are not saved. Eligible files are distributed as evenly as possible, and each student file is assigned to at most one evaluator.</p>
         <div class="table-wrap">
           <table>
             <thead>
@@ -145,33 +145,20 @@
           <button id="save-evaluators" class="button button-secondary" type="button">Save now</button>
           <span id="evaluator-status" class="status" role="status"></span>
         </div>
-        <div class="actions">
-          <button id="preview-evaluator-assignments" class="button button-secondary" type="button">Generate random assignment preview</button>
-          <span id="assignment-preview-status" class="status" role="status"></span>
-        </div>
-        <div id="assignment-preview" hidden>
-          <h3>Copy-to-evaluator assignment preview</h3>
-          <p class="help-text">Review this list before starting. This exact assignment will be saved in the upload run.</p>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Roll number</th>
-                  <th>Copy / file</th>
-                  <th>Evaluator</th>
-                  <th>Evaluator email</th>
-                </tr>
-              </thead>
-              <tbody id="assignment-list"></tbody>
-            </table>
-          </div>
-        </div>
       </section>
 
       <section class="panel">
-        <details id="file-status-panel" class="file-status-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">REVIEW BEFORE SENDING</p>
+            <h2>Files and recipients</h2>
+          </div>
+          <button id="preview-evaluator-assignments" class="button button-secondary" type="button">Preview files and recipients</button>
+        </div>
+        <p id="assignment-preview-status" class="status" role="status">Generate the preview before starting upload. You can remove any file you do not want to send.</p>
+        <details id="file-status-panel" class="file-status-panel" open>
           <summary id="file-status-summary">Files in this upload test</summary>
-          <p id="file-status-empty" class="help-text">Start an upload to see per-file status for that test.</p>
+          <p id="file-status-empty" class="help-text">Choose a folder and generate the preview to see files and recipients.</p>
           <div class="table-wrap">
             <table>
               <thead>
@@ -180,6 +167,7 @@
                   <th>File</th>
                   <th>Recipient / evaluator</th>
                   <th>Status</th>
+                  <th><span class="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody id="file-status-list"></tbody>
@@ -199,8 +187,8 @@
           Previous upload runs
           <select id="test-run"><option value="">Choose an upload run</option></select>
         </label>
-        <p id="test-run-summary" class="run-summary">Each upload creates its own record, separate from mail download/search runs.</p>
-        <p class="help-text">Each selected local file is sent as a new email using the subject above and body “Please find the attached file.” The upload folder, assignment, sender account, and per-file status are stored in that upload run’s JSON record.</p>
+        <p id="test-run-summary" class="run-summary">Upload runs are saved separately from mail download/search tests.</p>
+        <p class="help-text">Preview the file and recipient list above, then remove any files you do not want to send. Each remaining local file is sent as a new email using the subject above and body “Please find the attached file.” The upload folder, assignment, sender account, removed files, and per-file status are stored in that upload run’s JSON record. Reusing a test name resumes its saved run and skips files already sent or removed.</p>
         <div class="actions">
           <button id="send-mappings" class="button button-primary" type="button" disabled>Start upload</button>
           <span id="send-status" class="status" role="status"></span>

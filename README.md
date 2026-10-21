@@ -32,7 +32,17 @@ to a particular Gmail mailbox.
    root as `credentials.json`. Keep this file private; it is ignored by Git.
    Gmail and Drive use this same OAuth client file. If it is in another
    location, set `GOOGLE_DRIVE_CLIENT_SECRETS_FILE` in `.env` to its path.
-6. **Install and start the app.** From the project folder:
+6. **Start the app.** For double-click startup on macOS, double-click
+   `Start Mail Desk.command`. On Windows, double-click `Start Mail Desk.bat`.
+   The first launch creates a local `.venv` environment and installs the
+   packages from `requirements.txt`; this requires internet access. The launcher
+   then starts the server and opens <http://127.0.0.1:8000> in your browser.
+   Keep its terminal window open while using Mail Desk; press Ctrl+C there to
+   stop the server. If Python 3.10+ is not installed, install it first.
+   To add a desktop icon, create a shortcut/alias to the appropriate launcher
+   in the project folder; do not move the launcher out of the project.
+
+   To start manually instead:
 
    ```sh
    python -m pip install -r requirements.txt
@@ -76,8 +86,12 @@ connected Drive account, then shared with the email recipient.
 - **Download mail** uses the Gmail API to search the selected single inbox from the chosen date
   onward, optionally filtering by one or more comma-separated sender addresses.
   Multiple senders are combined as OR matches.
-  Enter a test name to label each saved run. Every use case gets a unique UUID
-  test ID and a JSON record at `data/tests/<test-id>.json`. It stores the test
+  Enter a test name to save and resume a download workflow. Each workflow keeps
+  a unique UUID test ID and a JSON record at `data/tests/<test-id>.json`; using
+  the same name again reuses the most recently updated matching download run.
+  Search results are refreshed, while downloaded status and file paths are
+  preserved for messages that still match. Downloaded rows remain visible and
+  marked complete, and cannot be selected again. The record stores the test
   name, search fields, message results,
   operation status/progress/errors, and counts for found, downloaded messages,
   downloaded files, and updated (uploaded) messages. Removing a row only
@@ -93,7 +107,10 @@ connected Drive account, then shared with the email recipient.
   PDF, and PNG respectively.
 - **Upload attachments** scans the selected local folder recursively and
   generates mapping rows from standalone five-digit roll numbers in filenames.
-  Enter a test name for each upload run. The shared CSV uses columns
+  Enter a test name to save and resume an upload workflow. Reusing the same name
+  reuses the most recently updated matching upload run, preserves sent status,
+  skips files already sent, and includes newly added or previously unsent files
+  from the same folder in the next preview. The shared CSV uses columns
   `roll_number,mail_account`; these mappings are reused across tests. A unique
   matching local file is sent as a new email
   attachment from the selected Gmail account through the Gmail API. If more than one file matches a
@@ -101,7 +118,11 @@ connected Drive account, then shared with the email recipient.
   sent status is stored in that upload run's JSON record, not in the shared CSV.
   Set the email subject template for each upload; `{roll_number}` is replaced
   with the matching five-digit value.
-  The upload page shows a collapsible per-file status list for the selected run.
+  Before enabling **Start upload**, the upload page generates a visible preview
+  showing each file and its intended recipient/evaluator. Remove any pending
+  file from the preview to exclude it; removed-file choices and per-file sent
+  status are saved in the run and remain excluded when resuming it.
+  The upload page also shows a per-file status list for the selected run.
   Scanning a folder preserves existing recipient mappings.
   Select **Randomly distribute to evaluators** to save a separate evaluator
   name/email list in `data/evaluators.csv`. The roster autosaves after edits
@@ -112,9 +133,9 @@ connected Drive account, then shared with the email recipient.
   records the exact file-to-evaluator assignments and send status.
   Generate and review the assignment preview before starting the send. The
   previewed assignment is validated and persisted unchanged in the upload run.
-  Starting an upload creates a dedicated upload-run JSON record, independent of
-  download/search test records. The upload history selector lists upload runs
-  only. Files larger than 16 MiB are uploaded to the connected Google Drive
+  Upload runs have their own records, separate from download/search records,
+  even when both workflows use the same test name. The upload history selector
+  lists upload runs only. Files larger than 16 MiB are uploaded to the connected Google Drive
   account instead of attached to Gmail. Drive grants reader access only to the
   intended recipient; it does not create public links. The email contains the
   Drive link. Drive copies remain in the connected account's Drive after
